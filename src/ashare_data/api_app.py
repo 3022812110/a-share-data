@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from .api_queries import load_ai_screening, load_market_overview, load_market_page, load_stock_detail
 from .backtesting import run_backtest
 from .db import init_db
+from .eastmoney_kline import fetch_stock_kline
 from .paper_trading import execute_paper_order, get_paper_portfolio, update_trade_review, upsert_trade_plan
 from .stock_market import sync_stock_market_snapshot
 from .watchlist import delete_watchlist_item, update_watchlist_targets
@@ -161,6 +162,26 @@ def stock_detail(stock_code: str) -> dict[str, object]:
     if not result["snapshot"]:
         raise HTTPException(status_code=404, detail="stock not found")
     return result
+
+
+@app.get("/api/stocks/{stock_code}/kline")
+def stock_kline(
+    stock_code: str,
+    interval: Literal["1m", "5m", "15m", "30m", "60m", "day", "week", "month"] = "day",
+    adjust: Literal["none", "raw", "qfq", "hfq"] = "qfq",
+    limit: int = 240,
+) -> dict[str, object]:
+    try:
+        return fetch_stock_kline(
+            stock_code,
+            interval=interval,
+            adjust=adjust,
+            limit=limit,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:  # pragma: no cover - upstream response instability
+        raise HTTPException(status_code=502, detail=f"kline fetch failed: {error}") from error
 
 
 @app.get("/api/paper/portfolio")

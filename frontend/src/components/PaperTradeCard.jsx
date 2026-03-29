@@ -1,6 +1,8 @@
-import { Button, Card, Descriptions, Form, Input, InputNumber, Space } from "antd";
+import { Button, Card, Form, Input, InputNumber, Space, Typography } from "antd";
 
 import { numberText } from "../lib/formatters";
+
+const { Text } = Typography;
 
 export default function PaperTradeCard({
   snapshot,
@@ -16,15 +18,24 @@ export default function PaperTradeCard({
   const quickTradeQuantity = Math.max(100, Number(snapshot.default_trade_quantity) || 100);
 
   return (
-    <Card size="small" title="模拟交易">
+    <Card size="small" title="AI交易">
       <Space direction="vertical" size={14} style={{ width: "100%" }}>
-        <Descriptions size="small" column={1} colon={false}>
-          <Descriptions.Item label="模拟账户">{account.account_name ?? "AI 模拟账户"}</Descriptions.Item>
-          <Descriptions.Item label="可用现金">¥{numberText(account.cash_balance)}</Descriptions.Item>
-          <Descriptions.Item label="当前持仓">
-            {snapshot.paper_quantity ? `${snapshot.paper_quantity} 股 / 成本 ${numberText(snapshot.paper_avg_cost)}` : "暂无持仓"}
-          </Descriptions.Item>
-        </Descriptions>
+        <div className="trade-account-strip">
+          <div className="trade-account-pill">
+            <Text type="secondary">模拟账户</Text>
+            <Text strong>{account.account_name ?? "AI 模拟账户"}</Text>
+          </div>
+          <div className="trade-account-pill">
+            <Text type="secondary">可用现金</Text>
+            <Text strong>¥{numberText(account.cash_balance)}</Text>
+          </div>
+          <div className="trade-account-pill">
+            <Text type="secondary">当前持仓</Text>
+            <Text strong>
+              {snapshot.paper_quantity ? `${snapshot.paper_quantity} 股 / 成本 ${numberText(snapshot.paper_avg_cost)}` : "暂无持仓"}
+            </Text>
+          </div>
+        </div>
 
         <Space wrap className="trade-shortcuts">
           <Button
@@ -55,7 +66,7 @@ export default function PaperTradeCard({
               <InputNumber min={100} step={100} style={{ width: "100%" }} />
             </Form.Item>
             <Form.Item label="备注" name="note">
-              <Input.TextArea rows={2} placeholder="这次模拟交易想验证什么" />
+              <Input.TextArea autoSize={{ minRows: 1, maxRows: 2 }} placeholder="这次模拟交易想验证什么" />
             </Form.Item>
           </div>
           <div className="trade-plan-grid">
@@ -76,7 +87,7 @@ export default function PaperTradeCard({
             <Input placeholder="例如：跌破止损位、量能明显走弱" />
           </Form.Item>
           <Form.Item label="计划备注" name="plan_note">
-            <Input.TextArea rows={2} placeholder="补充交易计划、观察点和风险项" />
+            <Input.TextArea autoSize={{ minRows: 1, maxRows: 2 }} placeholder="补充交易计划、观察点和风险项" />
           </Form.Item>
           <Space wrap>
             <Button type="primary" onClick={() => onPaperOrder("buy")} loading={paperOrdering}>

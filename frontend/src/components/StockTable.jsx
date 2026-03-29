@@ -83,9 +83,11 @@ export default function StockTable({
       title: "状态 / 操作",
       key: "status",
       render: (_, record) => (
-        <Space direction="vertical" size={6}>
-          {record.in_watchlist ? <Tag color="gold">自选</Tag> : <Tag>市场</Tag>}
-          <Text style={colorStyle(record.buy_distance_pct)}>{percentText(record.buy_distance_pct)}</Text>
+        <div className="table-status-cell">
+          <div className="table-status-head">
+            {record.in_watchlist ? <Tag color="gold">自选</Tag> : <Tag>市场</Tag>}
+            <Text style={colorStyle(record.buy_distance_pct)}>{percentText(record.buy_distance_pct)}</Text>
+          </div>
           <Space wrap className="table-action-group">
             {showTradeActions ? (
               <>
@@ -132,7 +134,7 @@ export default function StockTable({
               {record.in_watchlist ? "移除" : "加入"}
             </Button>
           </Space>
-        </Space>
+        </div>
       ),
     },
   ];

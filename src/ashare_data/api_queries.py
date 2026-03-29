@@ -5,6 +5,7 @@ import json
 import sqlite3
 
 from .db import get_connection
+from .market_feeds import load_market_insights, load_stock_event_feeds
 from .research import build_stock_research_card
 from .sync import sync_daily_bars_for_codes
 
@@ -192,6 +193,7 @@ def load_market_overview() -> dict[str, object]:
     result["major_indices"] = _dicts(index_rows)
     result["exchange_overview"] = json.loads(overview_cache["payload_json"]) if overview_cache else {}
     result["exchange_overview_fetched_at"] = overview_cache["fetched_at"] if overview_cache else None
+    result["market_insights"] = load_market_insights()
     return result
 
 
@@ -396,11 +398,13 @@ def load_stock_detail(stock_code: str) -> dict[str, object]:
     snapshot = dict(snapshot_row) if snapshot_row else None
     daily_bars = _dicts(daily_rows)
     research = build_stock_research_card(snapshot, daily_bars)
+    feeds = load_stock_event_feeds(stock_code, snapshot.get("stock_name") if snapshot else None)
 
     return {
         "snapshot": snapshot,
         "daily_bars": daily_bars,
         "research": research,
+        "feeds": feeds,
     }
 
 

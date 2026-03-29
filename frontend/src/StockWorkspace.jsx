@@ -9,13 +9,13 @@ import {
 } from "@ant-design/icons";
 
 import { request } from "./lib/api";
-import SummaryCards from "./components/SummaryCards";
 import MarketOverviewPanel from "./components/MarketOverviewPanel";
 import PaperPortfolioPanel from "./components/PaperPortfolioPanel";
-import DetailPanel from "./components/DetailPanel";
+import StockDetailPage from "./components/StockDetailPage";
 import StockTable from "./components/StockTable";
 import ScreeningTable from "./components/ScreeningTable";
 import ScreeningControls from "./components/ScreeningControls";
+import ScreeningChatPanel from "./components/ScreeningChatPanel";
 import ScreeningSummaryCard from "./components/ScreeningSummaryCard";
 
 const { Header, Sider, Content } = Layout;
@@ -33,7 +33,7 @@ const menuItems = [
   { key: "all", icon: <FundProjectionScreenOutlined />, label: "所有股票" },
   { key: "watch", icon: <StarOutlined />, label: "我的自选" },
   { key: "analysis", icon: <BarChartOutlined />, label: "AI条件选股" },
-  { key: "paper", icon: <BankOutlined />, label: "模拟交易" },
+  { key: "paper", icon: <BankOutlined />, label: "AI交易" },
 ];
 
 const screeningDefaults = {
@@ -61,6 +61,7 @@ export default function StockWorkspace() {
   const [sortOrder, setSortOrder] = React.useState("desc");
   const [watchlistOnly, setWatchlistOnly] = React.useState(false);
   const [selectedCode, setSelectedCode] = React.useState("");
+  const [detailPageOpen, setDetailPageOpen] = React.useState(false);
   const [detail, setDetail] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [detailLoading, setDetailLoading] = React.useState(false);
@@ -117,10 +118,6 @@ export default function StockWorkspace() {
         }
         return next;
       });
-      setSelectedCode((current) => {
-        if (current && data.items?.some((item) => item.stock_code === current)) return current;
-        return data.items?.[0]?.stock_code ?? "";
-      });
     } catch (error) {
       message.error(error.message || "加载列表失败");
     } finally {
@@ -133,12 +130,6 @@ export default function StockWorkspace() {
     try {
       const data = await request("/api/paper/portfolio");
       setPaperPortfolio(data);
-      if (activeMenu === "paper") {
-        setSelectedCode((current) => {
-          if (current && data.positions?.some((item) => item.stock_code === current)) return current;
-          return data.positions?.[0]?.stock_code ?? data.trades?.[0]?.stock_code ?? current;
-        });
-      }
     } catch (error) {
       message.error(error.message || "加载模拟账户失败");
     } finally {
@@ -147,7 +138,7 @@ export default function StockWorkspace() {
   }, [activeMenu, message]);
 
   const loadDetail = React.useCallback(async () => {
-    if (!selectedCode) {
+    if (!detailPageOpen || !selectedCode) {
       setDetail(null);
       return;
     }
@@ -178,7 +169,7 @@ export default function StockWorkspace() {
     } finally {
       setDetailLoading(false);
     }
-  }, [form, message, paperForm, selectedCode]);
+  }, [detailPageOpen, form, message, paperForm, selectedCode]);
 
   const loadScreening = React.useCallback(async () => {
     if (activeMenu !== "analysis") return;
@@ -215,7 +206,6 @@ export default function StockWorkspace() {
         return next;
       });
       setScreeningSummary(data.summary ?? null);
-      setSelectedCode(data.items?.[0]?.stock_code ?? "");
     } catch (error) {
       message.error(error.message || "加载条件选股失败");
     } finally {
@@ -232,6 +222,8 @@ export default function StockWorkspace() {
     setPage(1);
     setSearch("");
     setSelectedCode("");
+    setDetailPageOpen(false);
+    setDetail(null);
   }, [activeMenu]);
 
   React.useEffect(() => {
@@ -267,6 +259,17 @@ export default function StockWorkspace() {
       setRefreshing(false);
     }
   };
+
+  const handleOpenDetail = React.useCallback((stockCode) => {
+    setSelectedCode(stockCode);
+    setBacktest(null);
+    setDetailPageOpen(true);
+  }, []);
+
+  const handleCloseDetail = React.useCallback(() => {
+    setDetailPageOpen(false);
+    setBacktest(null);
+  }, []);
 
   const handleSave = async () => {
     if (!selectedCode) return;
@@ -538,39 +541,6 @@ export default function StockWorkspace() {
           />
         </Space>
       ) : null}
-      {activeMenu === "watch" ? (
-        <>
-          <Button
-            type="primary"
-            disabled={!selectedCode}
-            onClick={() =>
-              handleQuickTrade(
-                selectedCode,
-                "buy",
-                tradeQuantities[selectedCode] ?? detail?.snapshot?.default_trade_quantity ?? 100,
-                "一键买入当前自选",
-              )
-            }
-            loading={paperOrdering}
-          >
-            一键买入当前自选
-          </Button>
-          <Button
-            disabled={!selectedCode}
-            onClick={() =>
-              handleQuickTrade(
-                selectedCode,
-                "sell",
-                tradeQuantities[selectedCode] ?? detail?.snapshot?.default_trade_quantity ?? 100,
-                "一键卖出当前自选",
-              )
-            }
-            loading={paperOrdering}
-          >
-            卖出当前自选
-          </Button>
-        </>
-      ) : null}
     </Space>
   );
 
@@ -580,7 +550,7 @@ export default function StockWorkspace() {
       : activeMenu === "analysis"
         ? "AI条件选股"
         : activeMenu === "paper"
-          ? "模拟交易"
+          ? "AI交易"
           : "所有股票";
   const pageSubtitle =
     activeMenu === "watch"
@@ -628,89 +598,100 @@ export default function StockWorkspace() {
         </Header>
 
         <Content className="page-content">
-          {activeMenu === "all" ? (
-            <>
-              <SummaryCards summary={summary} />
-              <MarketOverviewPanel summary={summary} />
-            </>
-          ) : null}
-
-          {activeMenu === "analysis" ? <ScreeningSummaryCard summary={screeningSummary} /> : null}
-          {activeMenu === "analysis" ? (
-            <ScreeningControls
-              screeningPreset={screeningPreset}
-              setScreeningPreset={setScreeningPreset}
-              screeningFilters={screeningFilters}
-              updateScreeningField={updateScreeningField}
-              onRun={() => loadScreening()}
-              onReset={() => {
-                setScreeningPreset("momentum");
-                setScreeningFilters({ ...screeningDefaults });
-              }}
-              screeningLoading={screeningLoading}
+          {detailPageOpen ? (
+            <StockDetailPage
+              activeMenu={activeMenu}
+              detail={detail}
+              loading={detailLoading}
+              onBack={handleCloseDetail}
+              onRefresh={handleRefresh}
+              refreshing={refreshing}
+              form={form}
+              onSave={handleSave}
+              onRemove={handleRemove}
+              saving={saving}
+              onRunBacktest={handleRunBacktest}
+              backtest={backtest}
+              backtesting={backtesting}
+              paperForm={paperForm}
+              onPaperOrder={handlePaperOrder}
+              onSavePlan={handleSavePlan}
+              onQuickTrade={handleQuickTrade}
+              paperOrdering={paperOrdering}
+              planSaving={planSaving}
+              portfolio={paperPortfolio}
             />
-          ) : null}
+          ) : (
+            <>
+              {activeMenu === "all" ? (
+                <>
+                  <MarketOverviewPanel summary={summary} />
+                </>
+              ) : null}
 
-          <div className={`main-grid ${activeMenu !== "all" ? "main-grid-compact" : ""}`}>
-            {activeMenu === "analysis" ? (
-              <ScreeningTable
-                data={screeningData}
-                loading={screeningLoading}
-                onPick={setSelectedCode}
-                onToggleWatchlist={handleToggleWatchlist}
-              />
-            ) : activeMenu === "paper" ? (
-              <PaperPortfolioPanel
-                portfolio={paperPortfolio}
-                loading={paperLoading}
-                onSelectCode={setSelectedCode}
-                onOpenReview={handleOpenReview}
-              />
-            ) : (
-              <StockTable
-                title={pageTitle}
-                items={items}
-                total={total}
-                loading={loading}
-                page={page}
-                pageSize={pageSize}
-                onPageChange={(nextPage, nextSize) => {
-                  setPage(nextPage);
-                  setPageSize(nextSize);
-                }}
-                selectedCode={selectedCode}
-                onSelectCode={setSelectedCode}
-                onToggleWatchlist={handleToggleWatchlist}
-                onQuickTrade={handleQuickTrade}
-                tradeQuantities={tradeQuantities}
-                onTradeQuantityChange={handleTradeQuantityChange}
-                showTradeActions={activeMenu === "watch"}
-                controls={renderToolbar()}
-              />
-            )}
+              {activeMenu === "analysis" ? (
+                <ScreeningChatPanel
+                  summary={screeningSummary}
+                  data={screeningData}
+                  loading={screeningLoading}
+                  onPick={handleOpenDetail}
+                />
+              ) : null}
 
-            <div className="detail-column">
-              <DetailPanel
-                activeMenu={activeMenu}
-                detail={detail}
-                loading={detailLoading}
-                form={form}
-                onSave={handleSave}
-                onRemove={handleRemove}
-                saving={saving}
-                onRunBacktest={handleRunBacktest}
-                backtest={backtest}
-                backtesting={backtesting}
-                paperForm={paperForm}
-                onPaperOrder={handlePaperOrder}
-                onSavePlan={handleSavePlan}
-                onQuickTrade={handleQuickTrade}
-                paperOrdering={paperOrdering}
-                planSaving={planSaving}
-                portfolio={paperPortfolio}
-              />
-            </div>
-          </div>
+              {activeMenu === "analysis" ? <ScreeningSummaryCard summary={screeningSummary} /> : null}
+              {activeMenu === "analysis" ? (
+                <ScreeningControls
+                  screeningPreset={screeningPreset}
+                  setScreeningPreset={setScreeningPreset}
+                  screeningFilters={screeningFilters}
+                  updateScreeningField={updateScreeningField}
+                  onRun={() => loadScreening()}
+                  onReset={() => {
+                    setScreeningPreset("momentum");
+                    setScreeningFilters({ ...screeningDefaults });
+                  }}
+                  screeningLoading={screeningLoading}
+                />
+              ) : null}
+
+              {activeMenu === "analysis" ? (
+                <ScreeningTable
+                  data={screeningData}
+                  loading={screeningLoading}
+                  onPick={handleOpenDetail}
+                  onToggleWatchlist={handleToggleWatchlist}
+                />
+              ) : activeMenu === "paper" ? (
+                <PaperPortfolioPanel
+                  portfolio={paperPortfolio}
+                  loading={paperLoading}
+                  onSelectCode={handleOpenDetail}
+                  onOpenReview={handleOpenReview}
+                />
+              ) : (
+                <StockTable
+                  title={pageTitle}
+                  items={items}
+                  total={total}
+                  loading={loading}
+                  page={page}
+                  pageSize={pageSize}
+                  onPageChange={(nextPage, nextSize) => {
+                    setPage(nextPage);
+                    setPageSize(nextSize);
+                  }}
+                  selectedCode={selectedCode}
+                  onSelectCode={handleOpenDetail}
+                  onToggleWatchlist={handleToggleWatchlist}
+                  onQuickTrade={handleQuickTrade}
+                  tradeQuantities={tradeQuantities}
+                  onTradeQuantityChange={handleTradeQuantityChange}
+                  showTradeActions={activeMenu === "watch"}
+                  controls={renderToolbar()}
+                />
+              )}
+            </>
+          )}
         </Content>
       </Layout>
       <Modal

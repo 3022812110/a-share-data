@@ -13,7 +13,7 @@ export default function ScreeningControls({
 }) {
   return (
     <Card bordered={false} className="screening-controls-card">
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <div className="screening-controls-stack">
         <div className="screening-control-row">
           <div className="screening-control-main">
             <Text type="secondary">策略预设</Text>
@@ -42,7 +42,7 @@ export default function ScreeningControls({
         <div className="screening-query-box">
           <Text type="secondary">条件描述</Text>
           <Input.TextArea
-            rows={2}
+            autoSize={{ minRows: 1, maxRows: 2 }}
             value={screeningFilters.query}
             onChange={(event) => updateScreeningField("query", event.target.value)}
             placeholder="例如：放量上涨、价格不高、换手率高一点、优先看低估值股票"
@@ -127,13 +127,13 @@ export default function ScreeningControls({
           </div>
         </div>
 
-        <Space wrap>
+        <Space wrap className="screening-action-row">
           <Button type="primary" onClick={onRun} loading={screeningLoading}>
             开始筛选
           </Button>
           <Button onClick={onReset}>重置条件</Button>
         </Space>
-      </Space>
+      </div>
     </Card>
   );
 }

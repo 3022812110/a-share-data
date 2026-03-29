@@ -59,11 +59,23 @@ export default function ScreeningTable({ data, loading, onPick, onToggleWatchlis
       title: "操作",
       key: "action",
       render: (_, record) => (
-        <Space direction="vertical" size={4}>
-          <Button type="link" onClick={() => onPick(record.stock_code)}>
+        <Space size={6} wrap className="table-action-group">
+          <Button
+            type="link"
+            onClick={(event) => {
+              event.stopPropagation();
+              onPick(record.stock_code);
+            }}
+          >
             查看
           </Button>
-          <Button size="small" onClick={() => onToggleWatchlist(record)}>
+          <Button
+            size="small"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleWatchlist(record);
+            }}
+          >
             {record.in_watchlist ? "移除自选" : "加入自选"}
           </Button>
         </Space>
@@ -81,6 +93,7 @@ export default function ScreeningTable({ data, loading, onPick, onToggleWatchlis
         size="small"
         scroll={{ y: 700 }}
         pagination={{ pageSize: 20 }}
+        onRow={(record) => ({ onClick: () => onPick(record.stock_code) })}
       />
     </Card>
   );

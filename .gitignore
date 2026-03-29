@@ -6,6 +6,7 @@ __pycache__/
 .env.local
 
 data/*.db
+data/*.db-*
 data/*.sqlite
 
 frontend/node_modules/

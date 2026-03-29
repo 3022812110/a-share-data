@@ -174,8 +174,16 @@ def init_db() -> None:
                 plan_id INTEGER,
                 side TEXT NOT NULL,
                 quantity INTEGER NOT NULL,
+                quoted_price REAL,
                 price REAL NOT NULL,
                 amount REAL NOT NULL,
+                gross_amount REAL,
+                commission_fee REAL NOT NULL DEFAULT 0,
+                stamp_duty_fee REAL NOT NULL DEFAULT 0,
+                transfer_fee REAL NOT NULL DEFAULT 0,
+                slippage_rate REAL NOT NULL DEFAULT 0,
+                total_fees REAL NOT NULL DEFAULT 0,
+                net_amount REAL,
                 realized_pnl REAL NOT NULL DEFAULT 0,
                 note TEXT,
                 trade_time TEXT NOT NULL,
@@ -184,6 +192,24 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_paper_trades_account_time
             ON paper_trades (account_id, trade_time DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS paper_position_lots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                market TEXT,
+                trade_date TEXT NOT NULL,
+                trade_time TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                remaining_quantity INTEGER NOT NULL,
+                cost_price REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_paper_position_lots_account_code
+            ON paper_position_lots (account_id, stock_code, trade_date ASC, id ASC);
 
             CREATE TABLE IF NOT EXISTS paper_trade_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,6 +288,18 @@ def init_db() -> None:
             connection.execute(
                 "ALTER TABLE paper_trades ADD COLUMN plan_id INTEGER"
             )
+        for column_name, column_sql in (
+            ("quoted_price", "ALTER TABLE paper_trades ADD COLUMN quoted_price REAL"),
+            ("gross_amount", "ALTER TABLE paper_trades ADD COLUMN gross_amount REAL"),
+            ("commission_fee", "ALTER TABLE paper_trades ADD COLUMN commission_fee REAL NOT NULL DEFAULT 0"),
+            ("stamp_duty_fee", "ALTER TABLE paper_trades ADD COLUMN stamp_duty_fee REAL NOT NULL DEFAULT 0"),
+            ("transfer_fee", "ALTER TABLE paper_trades ADD COLUMN transfer_fee REAL NOT NULL DEFAULT 0"),
+            ("slippage_rate", "ALTER TABLE paper_trades ADD COLUMN slippage_rate REAL NOT NULL DEFAULT 0"),
+            ("total_fees", "ALTER TABLE paper_trades ADD COLUMN total_fees REAL NOT NULL DEFAULT 0"),
+            ("net_amount", "ALTER TABLE paper_trades ADD COLUMN net_amount REAL"),
+        ):
+            if column_name not in paper_trade_columns:
+                connection.execute(column_sql)
         connection.execute(
             """
             UPDATE watchlist
@@ -291,3 +329,32 @@ def init_db() -> None:
                 VALUES ('default', 'AI 模拟账户', 20000, 20000, datetime('now'), datetime('now'))
                 """
             )
+        connection.execute(
+            """
+            INSERT INTO paper_position_lots (
+                account_id, stock_code, stock_name, market,
+                trade_date, trade_time, quantity, remaining_quantity,
+                cost_price, created_at, updated_at
+            )
+            SELECT
+                p.account_id,
+                p.stock_code,
+                p.stock_name,
+                p.market,
+                substr(p.opened_at, 1, 10),
+                p.opened_at,
+                p.quantity,
+                p.quantity,
+                p.avg_cost,
+                p.opened_at,
+                p.updated_at
+            FROM paper_positions p
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM paper_position_lots l
+                WHERE l.account_id = p.account_id
+                  AND l.stock_code = p.stock_code
+                  AND l.remaining_quantity > 0
+            )
+            """
+        )
