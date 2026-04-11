@@ -238,6 +238,57 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_paper_trade_plans_account_status
             ON paper_trade_plans (account_id, status, updated_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS ai_trade_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                action TEXT NOT NULL,
+                summary TEXT,
+                entry_reason TEXT,
+                planned_holding_days INTEGER,
+                buy_price REAL,
+                stop_loss_price REAL,
+                take_profit_price REAL,
+                invalidation_condition TEXT,
+                plan_note TEXT,
+                quantity INTEGER,
+                position_size_pct REAL,
+                confidence TEXT,
+                risk_level TEXT,
+                reasoning_json TEXT,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                raw_response TEXT,
+                status TEXT NOT NULL DEFAULT 'generated',
+                applied_plan_id INTEGER,
+                executed_trade_id INTEGER,
+                exit_reason TEXT,
+                review_rating TEXT,
+                review_summary TEXT,
+                lessons_learned TEXT,
+                reviewed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ai_trade_decisions_account_created
+            ON ai_trade_decisions (account_id, created_at DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_ai_trade_decisions_stock_created
+            ON ai_trade_decisions (stock_code, created_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS screening_chat_sessions (
+                context_key TEXT PRIMARY KEY,
+                summary_json TEXT NOT NULL,
+                messages_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_screening_chat_sessions_updated
+            ON screening_chat_sessions (updated_at DESC, context_key ASC);
             """
         )
         columns = {
@@ -299,6 +350,19 @@ def init_db() -> None:
             ("net_amount", "ALTER TABLE paper_trades ADD COLUMN net_amount REAL"),
         ):
             if column_name not in paper_trade_columns:
+                connection.execute(column_sql)
+        ai_trade_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(ai_trade_decisions)").fetchall()
+        }
+        for column_name, column_sql in (
+            ("exit_reason", "ALTER TABLE ai_trade_decisions ADD COLUMN exit_reason TEXT"),
+            ("review_rating", "ALTER TABLE ai_trade_decisions ADD COLUMN review_rating TEXT"),
+            ("review_summary", "ALTER TABLE ai_trade_decisions ADD COLUMN review_summary TEXT"),
+            ("lessons_learned", "ALTER TABLE ai_trade_decisions ADD COLUMN lessons_learned TEXT"),
+            ("reviewed_at", "ALTER TABLE ai_trade_decisions ADD COLUMN reviewed_at TEXT"),
+        ):
+            if column_name not in ai_trade_columns:
                 connection.execute(column_sql)
         connection.execute(
             """

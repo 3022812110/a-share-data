@@ -84,7 +84,7 @@ export default function ScreeningTable({ data, loading, onPick, onToggleWatchlis
   ];
 
   return (
-    <Card bordered={false} className="table-card" title="AI条件选股结果">
+    <Card bordered={false} className="table-card" title="AI分析候选池">
       <Table
         rowKey="stock_code"
         columns={columns}

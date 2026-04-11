@@ -1,5 +1,5 @@
 import React from "react";
-import { App as AntApp, Button, Form, Input, InputNumber, Layout, Menu, Modal, Select, Space, Switch, Typography } from "antd";
+import { App as AntApp, Button, Drawer, Form, Input, InputNumber, Layout, Menu, Modal, Select, Space, Switch, Typography } from "antd";
 import {
   BarChartOutlined,
   BankOutlined,
@@ -9,14 +9,14 @@ import {
 } from "@ant-design/icons";
 
 import { request } from "./lib/api";
+import { loadModelSettings, persistModelSettings } from "./lib/aiModelSettings";
 import MarketOverviewPanel from "./components/MarketOverviewPanel";
+import AiModelSettingsModal from "./components/AiModelSettingsModal";
 import PaperPortfolioPanel from "./components/PaperPortfolioPanel";
 import StockDetailPage from "./components/StockDetailPage";
 import StockTable from "./components/StockTable";
-import ScreeningTable from "./components/ScreeningTable";
-import ScreeningControls from "./components/ScreeningControls";
 import ScreeningChatPanel from "./components/ScreeningChatPanel";
-import ScreeningSummaryCard from "./components/ScreeningSummaryCard";
+import AnalysisSidebar from "./components/AnalysisSidebar";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -32,7 +32,7 @@ const sortOptions = [
 const menuItems = [
   { key: "all", icon: <FundProjectionScreenOutlined />, label: "所有股票" },
   { key: "watch", icon: <StarOutlined />, label: "我的自选" },
-  { key: "analysis", icon: <BarChartOutlined />, label: "AI条件选股" },
+  { key: "analysis", icon: <BarChartOutlined />, label: "AI分析" },
   { key: "paper", icon: <BankOutlined />, label: "AI交易" },
 ];
 
@@ -72,6 +72,7 @@ export default function StockWorkspace() {
   const [screeningData, setScreeningData] = React.useState([]);
   const [screeningSummary, setScreeningSummary] = React.useState(null);
   const [screeningLoading, setScreeningLoading] = React.useState(false);
+  const [analysisPanelOpen, setAnalysisPanelOpen] = React.useState(false);
   const [backtest, setBacktest] = React.useState(null);
   const [backtesting, setBacktesting] = React.useState(false);
   const [paperPortfolio, setPaperPortfolio] = React.useState({ account: {}, positions: [], trades: [] });
@@ -81,6 +82,13 @@ export default function StockWorkspace() {
   const [reviewTarget, setReviewTarget] = React.useState(null);
   const [reviewSaving, setReviewSaving] = React.useState(false);
   const [tradeQuantities, setTradeQuantities] = React.useState({});
+  const [modelSettings, setModelSettings] = React.useState(loadModelSettings);
+  const [draftModelSettings, setDraftModelSettings] = React.useState(loadModelSettings);
+  const [modelSettingsOpen, setModelSettingsOpen] = React.useState(false);
+  const [aiTradeDecisions, setAiTradeDecisions] = React.useState([]);
+  const [aiTradeLoading, setAiTradeLoading] = React.useState(false);
+  const [aiTradeGenerating, setAiTradeGenerating] = React.useState(false);
+  const [aiTradeActing, setAiTradeActing] = React.useState("");
   const [form] = Form.useForm();
   const [paperForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
@@ -136,6 +144,25 @@ export default function StockWorkspace() {
       setPaperLoading(false);
     }
   }, [activeMenu, message]);
+
+  const loadAiTradeDecisions = React.useCallback(
+    async (stockCode = selectedCode) => {
+      if (!stockCode) {
+        setAiTradeDecisions([]);
+        return;
+      }
+      setAiTradeLoading(true);
+      try {
+        const data = await request(`/api/ai-trade/decisions?stock_code=${stockCode}&limit=6`);
+        setAiTradeDecisions(data.items ?? []);
+      } catch (error) {
+        message.error(error.message || "加载 AI 票据失败");
+      } finally {
+        setAiTradeLoading(false);
+      }
+    },
+    [message, selectedCode]
+  );
 
   const loadDetail = React.useCallback(async () => {
     if (!detailPageOpen || !selectedCode) {
@@ -207,7 +234,7 @@ export default function StockWorkspace() {
       });
       setScreeningSummary(data.summary ?? null);
     } catch (error) {
-      message.error(error.message || "加载条件选股失败");
+      message.error(error.message || "加载 AI 分析候选池失败");
     } finally {
       setScreeningLoading(false);
     }
@@ -219,11 +246,19 @@ export default function StockWorkspace() {
   }, [loadPaperPortfolio, loadSummary]);
 
   React.useEffect(() => {
+    if (!modelSettingsOpen) return;
+    setDraftModelSettings(modelSettings);
+  }, [modelSettings, modelSettingsOpen]);
+
+  React.useEffect(() => {
     setPage(1);
     setSearch("");
     setSelectedCode("");
     setDetailPageOpen(false);
     setDetail(null);
+    if (activeMenu !== "analysis") {
+      setAnalysisPanelOpen(false);
+    }
   }, [activeMenu]);
 
   React.useEffect(() => {
@@ -239,6 +274,14 @@ export default function StockWorkspace() {
   React.useEffect(() => {
     loadDetail().catch(() => {});
   }, [loadDetail]);
+
+  React.useEffect(() => {
+    if (!detailPageOpen || !selectedCode) {
+      setAiTradeDecisions([]);
+      return;
+    }
+    loadAiTradeDecisions(selectedCode).catch(() => {});
+  }, [detailPageOpen, loadAiTradeDecisions, selectedCode]);
 
   React.useEffect(() => {
     setBacktest(null);
@@ -454,7 +497,7 @@ export default function StockWorkspace() {
         method: "PUT",
         body: JSON.stringify(values),
       });
-      await Promise.all([loadPaperPortfolio(), loadDetail()]);
+      await Promise.all([loadPaperPortfolio(), loadDetail(), loadAiTradeDecisions(selectedCode)]);
       setReviewTarget(null);
       reviewForm.resetFields();
       message.success("复盘已保存");
@@ -464,6 +507,52 @@ export default function StockWorkspace() {
       }
     } finally {
       setReviewSaving(false);
+    }
+  };
+
+  const handleSaveModelSettings = React.useCallback(() => {
+    const next = {
+      ...draftModelSettings,
+      temperature: Number(draftModelSettings.temperature ?? modelSettings.temperature ?? 0.3),
+      maxTokens: Number(draftModelSettings.maxTokens ?? modelSettings.maxTokens ?? 4000),
+    };
+    setModelSettings(next);
+    persistModelSettings(next);
+    setModelSettingsOpen(false);
+  }, [draftModelSettings, modelSettings.maxTokens, modelSettings.temperature]);
+
+  const handleGenerateAiTradeDecision = async () => {
+    if (!selectedCode) return;
+    setAiTradeGenerating(true);
+    try {
+      await request(`/api/ai-trade/decisions/${selectedCode}`, {
+        method: "POST",
+        body: JSON.stringify({ settings: modelSettings }),
+      });
+      await Promise.all([loadAiTradeDecisions(selectedCode), loadDetail(), loadPaperPortfolio()]);
+      message.success("AI 建议已生成");
+    } catch (error) {
+      message.error(error.message || "生成 AI 建议失败");
+    } finally {
+      setAiTradeGenerating(false);
+    }
+  };
+
+  const handleApplyAiTradeDecision = async (decisionId, executeOrder = false) => {
+    if (!decisionId) return;
+    const actionKey = `${executeOrder ? "execute" : "apply"}-${decisionId}`;
+    setAiTradeActing(actionKey);
+    try {
+      await request(
+        `/api/ai-trade/decisions/${decisionId}/${executeOrder ? "execute" : "apply"}`,
+        { method: "POST" }
+      );
+      await Promise.all([loadAiTradeDecisions(selectedCode), loadPaperPortfolio(), loadDetail()]);
+      message.success(executeOrder ? "AI 建议已执行到模拟盘" : "AI 建议已套用到交易计划");
+    } catch (error) {
+      message.error(error.message || "处理 AI 建议失败");
+    } finally {
+      setAiTradeActing("");
     }
   };
 
@@ -548,7 +637,7 @@ export default function StockWorkspace() {
     activeMenu === "watch"
       ? "我的自选"
       : activeMenu === "analysis"
-        ? "AI条件选股"
+        ? "AI分析"
         : activeMenu === "paper"
           ? "AI交易"
           : "所有股票";
@@ -556,7 +645,7 @@ export default function StockWorkspace() {
     activeMenu === "watch"
       ? "这里只显示你主动加入的自选股"
       : activeMenu === "analysis"
-        ? "按第一版规则评分筛选强势候选股"
+        ? ""
         : activeMenu === "paper"
           ? "默认 20000 元虚拟资金，用来训练你的交易纪律和我的研究能力"
           : "全市场实时快照与个股工作台";
@@ -588,7 +677,7 @@ export default function StockWorkspace() {
             <Title level={4} style={{ margin: 0 }}>
               {pageTitle}
             </Title>
-            <Text type="secondary">{pageSubtitle}</Text>
+            {pageSubtitle ? <Text type="secondary">{pageSubtitle}</Text> : null}
           </div>
           <Space>
             <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing}>
@@ -620,6 +709,15 @@ export default function StockWorkspace() {
               paperOrdering={paperOrdering}
               planSaving={planSaving}
               portfolio={paperPortfolio}
+              modelSettings={modelSettings}
+              onOpenModelSettings={() => setModelSettingsOpen(true)}
+              aiTradeDecisions={aiTradeDecisions}
+              aiTradeLoading={aiTradeLoading}
+              aiTradeGenerating={aiTradeGenerating}
+              aiTradeActing={aiTradeActing}
+              onGenerateAiTradeDecision={handleGenerateAiTradeDecision}
+              onApplyAiTradeDecision={(decisionId) => handleApplyAiTradeDecision(decisionId, false)}
+              onExecuteAiTradeDecision={(decisionId) => handleApplyAiTradeDecision(decisionId, true)}
             />
           ) : (
             <>
@@ -630,45 +728,27 @@ export default function StockWorkspace() {
               ) : null}
 
               {activeMenu === "analysis" ? (
-                <ScreeningChatPanel
-                  summary={screeningSummary}
-                  data={screeningData}
-                  loading={screeningLoading}
-                  onPick={handleOpenDetail}
-                />
+                <div className="analysis-page-shell">
+                  <ScreeningChatPanel
+                    summary={screeningSummary}
+                    data={screeningData}
+                    loading={screeningLoading}
+                    modelSettings={modelSettings}
+                    portfolio={paperPortfolio}
+                    onPick={handleOpenDetail}
+                    onOpenWorkspacePanel={() => setAnalysisPanelOpen(true)}
+                    onOpenSettings={() => setModelSettingsOpen(true)}
+                  />
+                </div>
               ) : null}
-
-              {activeMenu === "analysis" ? <ScreeningSummaryCard summary={screeningSummary} /> : null}
-              {activeMenu === "analysis" ? (
-                <ScreeningControls
-                  screeningPreset={screeningPreset}
-                  setScreeningPreset={setScreeningPreset}
-                  screeningFilters={screeningFilters}
-                  updateScreeningField={updateScreeningField}
-                  onRun={() => loadScreening()}
-                  onReset={() => {
-                    setScreeningPreset("momentum");
-                    setScreeningFilters({ ...screeningDefaults });
-                  }}
-                  screeningLoading={screeningLoading}
-                />
-              ) : null}
-
-              {activeMenu === "analysis" ? (
-                <ScreeningTable
-                  data={screeningData}
-                  loading={screeningLoading}
-                  onPick={handleOpenDetail}
-                  onToggleWatchlist={handleToggleWatchlist}
-                />
-              ) : activeMenu === "paper" ? (
+              {activeMenu === "paper" ? (
                 <PaperPortfolioPanel
                   portfolio={paperPortfolio}
                   loading={paperLoading}
                   onSelectCode={handleOpenDetail}
                   onOpenReview={handleOpenReview}
                 />
-              ) : (
+              ) : activeMenu === "analysis" ? null : (
                 <StockTable
                   title={pageTitle}
                   items={items}
@@ -694,6 +774,34 @@ export default function StockWorkspace() {
           )}
         </Content>
       </Layout>
+      <Drawer
+        title="候选池与设置"
+        placement="right"
+        width={440}
+        open={analysisPanelOpen}
+        onClose={() => setAnalysisPanelOpen(false)}
+        destroyOnClose={false}
+      >
+        <AnalysisSidebar
+          screeningPreset={screeningPreset}
+          setScreeningPreset={setScreeningPreset}
+          screeningFilters={screeningFilters}
+          updateScreeningField={updateScreeningField}
+          onRun={() => loadScreening()}
+          onReset={() => {
+            setScreeningPreset("momentum");
+            setScreeningFilters({ ...screeningDefaults });
+          }}
+          screeningLoading={screeningLoading}
+          summary={screeningSummary}
+          data={screeningData}
+          onPick={(stockCode) => {
+            setAnalysisPanelOpen(false);
+            handleOpenDetail(stockCode);
+          }}
+          onToggleWatchlist={handleToggleWatchlist}
+        />
+      </Drawer>
       <Modal
         title={reviewTarget ? `${reviewTarget.stock_name} 交易复盘` : "交易复盘"}
         open={Boolean(reviewTarget)}
@@ -729,6 +837,13 @@ export default function StockWorkspace() {
           </Form.Item>
         </Form>
       </Modal>
+      <AiModelSettingsModal
+        open={modelSettingsOpen}
+        draftSettings={draftModelSettings}
+        setDraftSettings={setDraftModelSettings}
+        onCancel={() => setModelSettingsOpen(false)}
+        onSave={handleSaveModelSettings}
+      />
     </Layout>
   );
 }

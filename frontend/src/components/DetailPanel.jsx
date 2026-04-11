@@ -25,6 +25,15 @@ export default function DetailPanel({
   paperOrdering,
   planSaving,
   portfolio,
+  modelSettings,
+  onOpenModelSettings,
+  aiTradeDecisions,
+  aiTradeLoading,
+  aiTradeGenerating,
+  aiTradeActing,
+  onGenerateAiTradeDecision,
+  onApplyAiTradeDecision,
+  onExecuteAiTradeDecision,
 }) {
   function yuanToYiText(value) {
     return value === null || value === undefined || Number.isNaN(Number(value))
@@ -113,6 +122,15 @@ export default function DetailPanel({
       onQuickTrade={onQuickTrade}
       paperOrdering={paperOrdering}
       planSaving={planSaving}
+      modelSettings={modelSettings}
+      onOpenModelSettings={onOpenModelSettings}
+      aiTradeDecisions={aiTradeDecisions}
+      aiTradeLoading={aiTradeLoading}
+      aiTradeGenerating={aiTradeGenerating}
+      aiTradeActing={aiTradeActing}
+      onGenerateAiTradeDecision={onGenerateAiTradeDecision}
+      onApplyAiTradeDecision={onApplyAiTradeDecision}
+      onExecuteAiTradeDecision={onExecuteAiTradeDecision}
     />
   );
 
@@ -656,10 +674,10 @@ export default function DetailPanel({
       { key: "watchlist", label: "自选设置", children: watchlistCard },
       { key: "backtest", label: "回测", children: backtestCard },
       { key: "profile", label: "资料", children: profileCard },
-      { key: "trade", label: `交易 ${defaultTradeQuantity}股`, children: tradeCard },
+      { key: "trade", label: "AI交易", children: tradeCard },
     ],
     watch: [
-      { key: "trade", label: `交易 ${defaultTradeQuantity}股`, children: tradeCard },
+      { key: "trade", label: "AI交易", children: tradeCard },
       { key: "chart", label: "K线", children: chartCard },
       { key: "money", label: "资金", children: moneyCard },
       { key: "fundamentals", label: "题材/财务", children: fundamentalsCard },
@@ -675,13 +693,13 @@ export default function DetailPanel({
       { key: "fundamentals", label: "题材/财务", children: fundamentalsCard },
       { key: "feeds", label: "资讯", children: feedsCard },
       { key: "research", label: "研究卡", children: researchCard },
-      { key: "trade", label: `交易 ${defaultTradeQuantity}股`, children: tradeCard },
+      { key: "trade", label: "AI交易", children: tradeCard },
       { key: "backtest", label: "回测", children: backtestCard },
       { key: "watchlist", label: "自选设置", children: watchlistCard },
       { key: "profile", label: "资料", children: profileCard },
     ],
     paper: [
-      { key: "trade", label: `交易 ${defaultTradeQuantity}股`, children: tradeCard },
+      { key: "trade", label: "AI交易", children: tradeCard },
       { key: "chart", label: "K线", children: chartCard },
       { key: "money", label: "资金", children: moneyCard },
       { key: "fundamentals", label: "题材/财务", children: fundamentalsCard },

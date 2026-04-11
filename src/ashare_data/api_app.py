@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from .ai_trade import apply_ai_trade_decision, generate_ai_trade_decision, list_ai_trade_decisions
 from .api_queries import load_ai_screening, load_market_overview, load_market_page, load_stock_detail
 from .backtesting import run_backtest
 from .db import init_db
 from .eastmoney_kline import fetch_stock_kline
 from .paper_trading import execute_paper_order, get_paper_portfolio, update_trade_review, upsert_trade_plan
+from .screening_chat_history import load_screening_chat_history, save_screening_chat_history
+from .screening_ai import analyze_screening_chat, stream_screening_chat
 from .stock_market import sync_stock_market_snapshot
 from .watchlist import delete_watchlist_item, update_watchlist_targets
 
@@ -53,6 +58,45 @@ class PaperPlanRequest(BaseModel):
     take_profit_price: float | None = Field(default=None, ge=0)
     invalidation_condition: str | None = None
     plan_note: str | None = None
+
+
+class ScreeningChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
+class ScreeningChatSettings(BaseModel):
+    provider: str
+    model: str
+    apiKey: str = ""
+    baseUrl: str = ""
+    systemPrompt: str = ""
+    temperature: float = Field(default=0.3, ge=0, le=2)
+    maxTokens: int = Field(default=4000, ge=256, le=16000)
+
+
+class ScreeningChatRequest(BaseModel):
+    summary: dict[str, object] | None = None
+    items: list[dict[str, object]] = Field(default_factory=list)
+    messages: list[ScreeningChatMessage] = Field(default_factory=list)
+    settings: ScreeningChatSettings
+
+
+class PersistedChatMessage(BaseModel):
+    id: str | None = None
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+    stockCodes: list[str] = Field(default_factory=list)
+
+
+class ScreeningChatHistoryRequest(BaseModel):
+    contextKey: str = Field(min_length=1)
+    summary: dict[str, object] | None = None
+    messages: list[PersistedChatMessage] = Field(default_factory=list)
+
+
+class AiTradeDecisionRequest(BaseModel):
+    settings: ScreeningChatSettings
 
 
 app = FastAPI(title="A-Share Data API", version="0.1.0")
@@ -148,6 +192,70 @@ def screening(
     )
 
 
+@app.post("/api/screening/chat")
+def screening_chat(payload: ScreeningChatRequest) -> dict[str, object]:
+    try:
+        return analyze_screening_chat(
+            settings=payload.settings.model_dump(),
+            messages=[message.model_dump() for message in payload.messages],
+            summary=payload.summary,
+            items=payload.items,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/screening/chat/stream")
+def screening_chat_stream(payload: ScreeningChatRequest) -> StreamingResponse:
+    try:
+        stream = stream_screening_chat(
+            settings=payload.settings.model_dump(),
+            messages=[message.model_dump() for message in payload.messages],
+            summary=payload.summary,
+            items=payload.items,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    def event_stream():
+        try:
+            for event in stream:
+                yield _format_sse(event["event"], event["data"])
+        except RuntimeError as error:
+            yield _format_sse("error", {"message": str(error)})
+        except Exception as error:  # pragma: no cover - defensive guard for stream transport
+            yield _format_sse("error", {"message": f"流式分析失败：{error}"})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/screening/chat/history")
+def screening_chat_history(context_key: str) -> dict[str, object]:
+    return load_screening_chat_history(context_key)
+
+
+@app.put("/api/screening/chat/history")
+def save_screening_history(payload: ScreeningChatHistoryRequest) -> dict[str, object]:
+    try:
+        return save_screening_chat_history(
+            context_key=payload.contextKey,
+            summary=payload.summary,
+            messages=[message.model_dump() for message in payload.messages],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.post("/api/stocks/refresh")
 def refresh_stocks(payload: RefreshRequest) -> dict[str, object]:
     return sync_stock_market_snapshot(
@@ -189,6 +297,49 @@ def paper_portfolio() -> dict[str, object]:
     return get_paper_portfolio()
 
 
+@app.get("/api/ai-trade/decisions")
+def ai_trade_decisions(
+    stock_code: str | None = None,
+    limit: int = 20,
+) -> dict[str, object]:
+    return {
+        "items": list_ai_trade_decisions(
+            stock_code=stock_code,
+            limit=limit,
+        )
+    }
+
+
+@app.post("/api/ai-trade/decisions/{stock_code}")
+def create_ai_trade_decision(stock_code: str, payload: AiTradeDecisionRequest) -> dict[str, object]:
+    try:
+        decision = generate_ai_trade_decision(
+            stock_code=stock_code,
+            settings=payload.settings.model_dump(),
+        )
+        return {"decision": decision}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/ai-trade/decisions/{decision_id}/apply")
+def apply_generated_ai_trade_decision(decision_id: int) -> dict[str, object]:
+    try:
+        return apply_ai_trade_decision(decision_id, execute_order=False)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/ai-trade/decisions/{decision_id}/execute")
+def execute_generated_ai_trade_decision(decision_id: int) -> dict[str, object]:
+    try:
+        return apply_ai_trade_decision(decision_id, execute_order=True)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.post("/api/paper/orders")
 def create_paper_order(payload: PaperOrderRequest) -> dict[str, object]:
     try:
@@ -218,6 +369,11 @@ def save_paper_review(plan_id: int, payload: PaperReviewRequest) -> dict[str, ob
         return {"status": "ok", "plan": plan}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _format_sse(event: str, data: dict[str, object]) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
 
 
 @app.put("/api/paper/plans/{stock_code}")

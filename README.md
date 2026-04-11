@@ -54,7 +54,6 @@ cd /Users/zhangmi/Desktop/Work/a-share-data
 source .venv/bin/activate
 PYTHONPATH=src python scripts/run_api.py
 ```
-
 默认监听：`http://127.0.0.1:8001`
 
 ### 4. 启动前端

@@ -798,4 +798,14 @@ def update_trade_review(
             """,
             (int(plan_id),),
         ).fetchone()
+    from .ai_trade import sync_ai_trade_review
+
+    sync_ai_trade_review(
+        int(plan_id),
+        exit_reason=normalized_review.get("exit_reason"),
+        review_rating=normalized_review.get("review_rating"),
+        review_summary=normalized_review.get("review_summary"),
+        lessons_learned=normalized_review.get("lessons_learned"),
+        account_id=account_id,
+    )
     return dict(updated)
