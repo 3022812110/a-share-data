@@ -289,6 +289,39 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_screening_chat_sessions_updated
             ON screening_chat_sessions (updated_at DESC, context_key ASC);
+
+            CREATE TABLE IF NOT EXISTS stock_change_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                trade_date TEXT NOT NULL,
+                event_time TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                market_code INTEGER,
+                change_type INTEGER NOT NULL,
+                type_name TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                price REAL,
+                change_pct REAL,
+                volume REAL,
+                amount REAL,
+                raw_info TEXT,
+                source TEXT NOT NULL DEFAULT 'eastmoney',
+                fetched_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_stock_change_events_date_time
+            ON stock_change_events (trade_date DESC, event_time DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_stock_change_events_stock_date
+            ON stock_change_events (stock_code, trade_date DESC, event_time DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_stock_change_events_type_date
+            ON stock_change_events (change_type, trade_date DESC, event_time DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_stock_change_events_direction_date
+            ON stock_change_events (direction, trade_date DESC, event_time DESC);
             """
         )
         columns = {

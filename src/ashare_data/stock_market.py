@@ -164,20 +164,35 @@ def _load_catalog_from_db() -> list[dict[str, str]]:
 
 def _resolve_full_market_catalog(trade_date: str | None = None) -> tuple[list[dict[str, str]], str | None]:
     if trade_date:
-        rows = _query_all_stock_rows(trade_date=trade_date)
+        try:
+            rows = _query_all_stock_rows(trade_date=trade_date)
+        except Exception:
+            rows = []
         if rows:
             return rows, trade_date
 
-    rows = _query_all_stock_rows()
+    baostock_available = True
+    try:
+        rows = _query_all_stock_rows()
+    except Exception:
+        rows = []
+        baostock_available = False
     if rows:
         return rows, trade_date
 
-    today = datetime.now().date()
-    for offset in range(1, 15):
-        candidate = (today - timedelta(days=offset)).isoformat()
-        rows = _query_all_stock_rows(trade_date=candidate)
-        if rows:
-            return rows, candidate
+    # BaoStock occasionally accepts the TCP connection but fails during login
+    # with "network receive error". Retrying another 14 logins only blocks the
+    # refresh endpoint for minutes, so use the persisted catalog immediately.
+    if baostock_available:
+        today = datetime.now().date()
+        for offset in range(1, 15):
+            candidate = (today - timedelta(days=offset)).isoformat()
+            try:
+                rows = _query_all_stock_rows(trade_date=candidate)
+            except Exception:
+                break
+            if rows:
+                return rows, candidate
 
     rows = _load_catalog_from_db()
     if rows:

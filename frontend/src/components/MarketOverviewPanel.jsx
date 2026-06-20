@@ -3,7 +3,9 @@ import { Card, Tabs, Tag, Typography } from "antd";
 import {
   FireOutlined,
   FundOutlined,
+  GlobalOutlined,
   NotificationOutlined,
+  TrophyOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 
@@ -56,7 +58,7 @@ function buildPlotTheme() {
   };
 }
 
-export default function MarketOverviewPanel({ summary }) {
+export default function MarketOverviewPanel({ summary, onSelectCode }) {
   const indices = summary.major_indices ?? [];
   const exchangeOverview = summary.exchange_overview ?? {};
   const insights = summary.market_insights ?? {};
@@ -67,6 +69,11 @@ export default function MarketOverviewPanel({ summary }) {
   const sectorRankings = insights.sector_rankings ?? {};
   const industryRanks = sectorRankings.industry ?? [];
   const conceptRanks = sectorRankings.concept ?? [];
+  const stockMoneyRanks = insights.stock_money_rankings ?? [];
+  const hotStocks = insights.hot_stocks ?? [];
+  const globalIndices = insights.global_indices ?? {};
+  const marketLongTiger = insights.market_long_tiger ?? {};
+  const marketLongTigerRows = marketLongTiger.items ?? [];
 
   const exchangeItems = [
     { label: "沪市公司", value: exchangeOverview?.sse?.listed_companies ?? "--" },
@@ -146,7 +153,7 @@ export default function MarketOverviewPanel({ summary }) {
         ],
     angleField: "value",
     colorField: "type",
-    height: 208,
+    height: 150,
     radius: 0.98,
     innerRadius: 0.72,
     padding: 0,
@@ -164,7 +171,7 @@ export default function MarketOverviewPanel({ summary }) {
           y: "46%",
           text: numberText(sentimentScore, 0),
           textAlign: "center",
-          fontSize: 28,
+          fontSize: 22,
           fontWeight: 700,
           fill: "#111827",
         },
@@ -187,7 +194,7 @@ export default function MarketOverviewPanel({ summary }) {
     data: industryChartData,
     xField: "name",
     yField: "value",
-    height: 228,
+    height: 168,
     padding: [10, 10, 26, 10],
     autoFit: true,
     theme: plotTheme,
@@ -215,7 +222,7 @@ export default function MarketOverviewPanel({ summary }) {
     data: conceptChartData,
     xField: "name",
     yField: "value",
-    height: 228,
+    height: 168,
     padding: [10, 10, 26, 10],
     autoFit: true,
     theme: plotTheme,
@@ -244,7 +251,7 @@ export default function MarketOverviewPanel({ summary }) {
     xField: "value",
     yField: "name",
     seriesField: "name",
-    height: 250,
+    height: 180,
     padding: [8, 12, 8, 4],
     autoFit: true,
     theme: plotTheme,
@@ -360,6 +367,132 @@ export default function MarketOverviewPanel({ summary }) {
         </div>
       ))}
     </div>
+  );
+
+  const stockMoneyPanel = (
+    <div className="market-topic-table market-data-ranking">
+      {stockMoneyRanks.map((item, index) => (
+        <button
+          type="button"
+          key={`money-${item.stock_code}`}
+          className="market-topic-table-row market-topic-table-row-link market-ranking-button"
+          onClick={() => onSelectCode?.(item.stock_code)}
+        >
+          <div className="market-topic-table-rank">{index + 1}</div>
+          <div className="market-topic-table-main">
+            <Text strong>{item.stock_name}</Text>
+            <Text type="secondary">
+              {item.stock_code} · 主力 {capText(item.main_net_inflow_yi)}
+            </Text>
+          </div>
+          <div className="market-topic-table-meta">
+            <Text strong style={colorStyle(item.net_inflow_yi)}>
+              {capText(item.net_inflow_yi)}
+            </Text>
+            <Text type="secondary" style={colorStyle(item.change_pct)}>
+              {percentText(item.change_pct)}
+            </Text>
+          </div>
+        </button>
+      ))}
+      {!stockMoneyRanks.length ? <Text type="secondary">暂未获取到个股资金流排名。</Text> : null}
+    </div>
+  );
+
+  const hotStocksPanel = (
+    <div className="market-topic-table market-data-ranking">
+      {hotStocks.map((item, index) => (
+        <button
+          type="button"
+          key={`hot-${item.stock_code}`}
+          className="market-topic-table-row market-topic-table-row-link market-ranking-button"
+          onClick={() => onSelectCode?.(item.stock_code)}
+        >
+          <div className="market-topic-table-rank">{index + 1}</div>
+          <div className="market-topic-table-main">
+            <Text strong>{item.stock_name}</Text>
+            <Text type="secondary">
+              {item.stock_code} · 热度 {numberText(item.heat, 0)}
+            </Text>
+          </div>
+          <div className="market-topic-table-meta">
+            <Text strong>{numberText(item.price, 2)}</Text>
+            <Text type="secondary" style={colorStyle(item.change_pct)}>
+              {percentText(item.change_pct)}
+            </Text>
+          </div>
+        </button>
+      ))}
+      {!hotStocks.length ? <Text type="secondary">暂未获取到热门股票。</Text> : null}
+    </div>
+  );
+
+  const longTigerPanel = (
+    <div className="market-chart-stack">
+      <div className="market-chart-card-head">
+        <Text strong>最近交易日 {marketLongTiger.trade_date ?? "--"}</Text>
+        <Text type="secondary">共 {marketLongTiger.total ?? 0} 只</Text>
+      </div>
+      <div className="market-topic-table market-data-ranking">
+        {marketLongTigerRows.slice(0, 12).map((item, index) => (
+          <button
+            type="button"
+            key={`lhb-${item.stock_code}`}
+            className="market-topic-table-row market-topic-table-row-link market-ranking-button"
+            onClick={() => onSelectCode?.(item.stock_code)}
+          >
+            <div className="market-topic-table-rank">{index + 1}</div>
+            <div className="market-topic-table-main">
+              <Text strong>{item.stock_name}</Text>
+              <Text type="secondary">
+                {item.stock_code} · {(item.reasons ?? []).slice(0, 2).join(" / ") || "龙虎榜上榜"}
+              </Text>
+            </div>
+            <div className="market-topic-table-meta">
+              <Text strong style={colorStyle(item.net_amount_yi)}>
+                {capText(item.net_amount_yi)}
+              </Text>
+              <Text type="secondary" style={colorStyle(item.change_pct)}>
+                {percentText(item.change_pct)}
+              </Text>
+            </div>
+          </button>
+        ))}
+        {!marketLongTigerRows.length ? <Text type="secondary">最近交易日暂无龙虎榜数据。</Text> : null}
+      </div>
+    </div>
+  );
+
+  const globalIndicesPanel = (
+    <Tabs
+      size="small"
+      items={[
+        ["common", "重点"],
+        ["asia", "亚洲"],
+        ["america", "美洲"],
+        ["europe", "欧洲"],
+      ].map(([key, label]) => ({
+        key,
+        label,
+        children: (
+          <div className="global-index-grid">
+            {(globalIndices[key] ?? []).map((item) => (
+              <div className="global-index-card" key={`${key}-${item.quote_code ?? item.code}`}>
+                <div>
+                  <Text strong>{item.name}</Text>
+                  <Text type="secondary">{item.location || item.code}</Text>
+                </div>
+                <div className="global-index-values">
+                  <Text strong>{numberText(item.price, 2)}</Text>
+                  <Text style={colorStyle(item.change_pct)}>{percentText(item.change_pct)}</Text>
+                </div>
+              </div>
+            ))}
+            {!(globalIndices[key] ?? []).length ? <Text type="secondary">暂无该区域指数。</Text> : null}
+          </div>
+        ),
+      }))}
+    />
   );
 
   return (
@@ -522,6 +655,46 @@ export default function MarketOverviewPanel({ summary }) {
                   </span>
                 ),
                 children: fundsPanel,
+              },
+              {
+                key: "stock-money",
+                label: (
+                  <span className="market-tab-label">
+                    <FundOutlined />
+                    个股资金
+                  </span>
+                ),
+                children: stockMoneyPanel,
+              },
+              {
+                key: "hot-stocks",
+                label: (
+                  <span className="market-tab-label">
+                    <FireOutlined />
+                    热门股票
+                  </span>
+                ),
+                children: hotStocksPanel,
+              },
+              {
+                key: "long-tiger",
+                label: (
+                  <span className="market-tab-label">
+                    <TrophyOutlined />
+                    龙虎榜
+                  </span>
+                ),
+                children: longTigerPanel,
+              },
+              {
+                key: "global",
+                label: (
+                  <span className="market-tab-label">
+                    <GlobalOutlined />
+                    全球指数
+                  </span>
+                ),
+                children: globalIndicesPanel,
               },
               {
                 key: "topics",

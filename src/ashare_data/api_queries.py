@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import json
 import sqlite3
 
 from .db import get_connection
 from .market_feeds import load_market_insights, load_stock_event_feeds
 from .research import build_stock_research_card
-from .sync import sync_daily_bars_for_codes
 
 
 SORTABLE_COLUMNS = {
@@ -161,7 +159,7 @@ def load_market_overview() -> dict[str, object]:
                 SUM(CASE WHEN change_pct < 0 THEN 1 ELSE 0 END) AS falling_count,
                 SUM(CASE WHEN change_pct >= 9.8 THEN 1 ELSE 0 END) AS limit_up_count,
                 SUM(CASE WHEN change_pct <= -9.8 THEN 1 ELSE 0 END) AS limit_down_count,
-                ROUND(SUM(COALESCE(amount, 0)) / 100000000, 2) AS total_turnover_yi,
+                ROUND(SUM(COALESCE(amount, 0)) / 10000, 2) AS total_turnover_yi,
                 MAX(fetched_at) AS latest_fetch,
                 MAX(trade_time) AS latest_trade_time,
                 (SELECT COUNT(*) FROM watchlist WHERE is_active = 1) AS watchlist_count
@@ -359,41 +357,6 @@ def load_stock_detail(stock_code: str) -> dict[str, object]:
             """,
             (stock_code,),
         ).fetchall()
-
-    should_refresh_bars = False
-    if not daily_rows:
-        should_refresh_bars = True
-    else:
-        latest_daily_date = str(daily_rows[0]["trade_date"])
-        should_refresh_bars = latest_daily_date < (datetime.now().date() - timedelta(days=7)).isoformat()
-
-    if should_refresh_bars:
-        sync_daily_bars_for_codes(
-            stock_codes=[stock_code],
-            start_date=(datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d"),
-            end_date=datetime.now().strftime("%Y-%m-%d"),
-        )
-        with get_connection() as connection:
-            daily_rows = connection.execute(
-                """
-                SELECT
-                    trade_date,
-                    open,
-                    close,
-                    high,
-                    low,
-                    volume,
-                    amount,
-                    change_pct,
-                    turnover_ratio,
-                    source
-                FROM daily_bars
-                WHERE stock_code = ?
-                ORDER BY trade_date DESC
-                LIMIT 120
-                """,
-                (stock_code,),
-            ).fetchall()
 
     snapshot = dict(snapshot_row) if snapshot_row else None
     daily_bars = _dicts(daily_rows)

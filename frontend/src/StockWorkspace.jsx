@@ -6,6 +6,7 @@ import {
   FundProjectionScreenOutlined,
   ReloadOutlined,
   StarOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 
 import { request } from "./lib/api";
@@ -17,9 +18,13 @@ import StockDetailPage from "./components/StockDetailPage";
 import StockTable from "./components/StockTable";
 import ScreeningChatPanel from "./components/ScreeningChatPanel";
 import AnalysisSidebar from "./components/AnalysisSidebar";
+import StockChangesPanel from "./components/StockChangesPanel";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
+
+// 第三方模型的选股分析暂时关闭；AI 模拟交易功能继续保留。
+const ENABLE_AI_ANALYSIS = false;
 
 const sortOptions = [
   { value: "change_pct", label: "涨跌幅" },
@@ -32,7 +37,10 @@ const sortOptions = [
 const menuItems = [
   { key: "all", icon: <FundProjectionScreenOutlined />, label: "所有股票" },
   { key: "watch", icon: <StarOutlined />, label: "我的自选" },
-  { key: "analysis", icon: <BarChartOutlined />, label: "AI分析" },
+  { key: "changes", icon: <ThunderboltOutlined />, label: "盘中异动" },
+  ...(ENABLE_AI_ANALYSIS
+    ? [{ key: "analysis", icon: <BarChartOutlined />, label: "AI分析" }]
+    : []),
   { key: "paper", icon: <BankOutlined />, label: "AI交易" },
 ];
 
@@ -89,9 +97,13 @@ export default function StockWorkspace() {
   const [aiTradeLoading, setAiTradeLoading] = React.useState(false);
   const [aiTradeGenerating, setAiTradeGenerating] = React.useState(false);
   const [aiTradeActing, setAiTradeActing] = React.useState("");
+  const [tradeRecommendations, setTradeRecommendations] = React.useState([]);
+  const [tradeRecommendationSummary, setTradeRecommendationSummary] = React.useState(null);
+  const [tradeRecommendationLoading, setTradeRecommendationLoading] = React.useState(false);
   const [form] = Form.useForm();
   const [paperForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
+  const paperMarketStatus = paperPortfolio?.market_status ?? {};
 
   const endpoint = activeMenu === "watch" ? "/api/watchlist" : "/api/stocks";
 
@@ -101,7 +113,7 @@ export default function StockWorkspace() {
   }, []);
 
   const loadList = React.useCallback(async () => {
-    if (activeMenu === "analysis" || activeMenu === "paper") return;
+    if (activeMenu === "analysis" || activeMenu === "paper" || activeMenu === "changes") return;
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -145,6 +157,18 @@ export default function StockWorkspace() {
     }
   }, [activeMenu, message]);
 
+  const refreshMarketStatus = React.useCallback(async () => {
+    try {
+      const data = await request("/api/market/status");
+      setPaperPortfolio((current) => ({
+        ...current,
+        market_status: data,
+      }));
+    } catch {
+      // 后端下单仍会强制校验；状态轮询失败时保持前端禁用或上一次状态。
+    }
+  }, []);
+
   const loadAiTradeDecisions = React.useCallback(
     async (stockCode = selectedCode) => {
       if (!stockCode) {
@@ -163,6 +187,28 @@ export default function StockWorkspace() {
     },
     [message, selectedCode]
   );
+
+  const loadTradeRecommendations = React.useCallback(async () => {
+    setTradeRecommendationLoading(true);
+    try {
+      const data = await request("/api/ai-trade/recommendations?limit=6");
+      setTradeRecommendations(data.recommendations ?? []);
+      setTradeRecommendationSummary(data);
+      setTradeQuantities((current) => {
+        const next = { ...current };
+        for (const item of data.recommendations ?? []) {
+          if (next[item.stock_code] === undefined) {
+            next[item.stock_code] = item.recommended_quantity ?? 100;
+          }
+        }
+        return next;
+      });
+    } catch (error) {
+      message.error(error.message || "加载训练推荐失败");
+    } finally {
+      setTradeRecommendationLoading(false);
+    }
+  }, [message]);
 
   const loadDetail = React.useCallback(async () => {
     if (!detailPageOpen || !selectedCode) {
@@ -246,6 +292,14 @@ export default function StockWorkspace() {
   }, [loadPaperPortfolio, loadSummary]);
 
   React.useEffect(() => {
+    refreshMarketStatus().catch(() => {});
+    const timer = window.setInterval(() => {
+      refreshMarketStatus().catch(() => {});
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refreshMarketStatus]);
+
+  React.useEffect(() => {
     if (!modelSettingsOpen) return;
     setDraftModelSettings(modelSettings);
   }, [modelSettings, modelSettingsOpen]);
@@ -264,12 +318,15 @@ export default function StockWorkspace() {
   React.useEffect(() => {
     if (activeMenu === "analysis") {
       loadScreening().catch(() => {});
+    } else if (activeMenu === "changes") {
+      return;
     } else if (activeMenu === "paper") {
       loadPaperPortfolio().catch(() => {});
+      loadTradeRecommendations().catch(() => {});
     } else {
       loadList().catch(() => {});
     }
-  }, [activeMenu, loadList, loadPaperPortfolio, loadScreening]);
+  }, [activeMenu, loadList, loadPaperPortfolio, loadScreening, loadTradeRecommendations]);
 
   React.useEffect(() => {
     loadDetail().catch(() => {});
@@ -294,7 +351,7 @@ export default function StockWorkspace() {
         method: "POST",
         body: JSON.stringify({}),
       });
-      await Promise.all([loadSummary(), loadList(), loadDetail(), loadScreening()]);
+      await Promise.all([loadSummary(), loadList(), loadDetail(), loadScreening(), loadTradeRecommendations()]);
       message.success("全市场快照已刷新");
     } catch (error) {
       message.error(error.message || "刷新失败");
@@ -375,6 +432,10 @@ export default function StockWorkspace() {
 
   const handlePaperOrder = async (side) => {
     if (!selectedCode) return;
+    if (paperMarketStatus.is_open !== true) {
+      message.warning(paperMarketStatus.reason || "当前不是 A 股交易时间，模拟盘不能买卖");
+      return;
+    }
     setPaperOrdering(true);
     try {
       const values = await paperForm.validateFields();
@@ -398,7 +459,7 @@ export default function StockWorkspace() {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      await Promise.all([loadPaperPortfolio(), loadDetail()]);
+      await Promise.all([loadPaperPortfolio(), loadDetail(), loadTradeRecommendations()]);
       message.success(side === "buy" ? "模拟买入已记录" : "模拟卖出已记录");
     } catch (error) {
       if (!error?.errorFields) {
@@ -411,6 +472,10 @@ export default function StockWorkspace() {
 
   const handleQuickTrade = async (stockCode, side, quantity = 100, note = "") => {
     if (!stockCode) return;
+    if (paperMarketStatus.is_open !== true) {
+      message.warning(paperMarketStatus.reason || "当前不是 A 股交易时间，模拟盘不能买卖");
+      return;
+    }
     setPaperOrdering(true);
     try {
       const normalizedQuantity = Math.max(100, Number(quantity) || 100);
@@ -418,6 +483,7 @@ export default function StockWorkspace() {
         (detail?.snapshot?.stock_code === stockCode ? detail.snapshot : null)
         ?? items.find((item) => item.stock_code === stockCode)
         ?? screeningData.find((item) => item.stock_code === stockCode)
+        ?? tradeRecommendations.find((item) => item.stock_code === stockCode)
         ?? paperPortfolio.positions.find((item) => item.stock_code === stockCode)
         ?? paperPortfolio.trades.find((item) => item.stock_code === stockCode);
       const payload = {
@@ -446,6 +512,7 @@ export default function StockWorkspace() {
         loadSummary(),
         loadList(),
         loadScreening(),
+        loadTradeRecommendations(),
         selectedCode === stockCode ? loadDetail() : Promise.resolve(),
       ]);
       message.success(side === "buy" ? "模拟买入已记录" : "模拟卖出已记录");
@@ -547,7 +614,7 @@ export default function StockWorkspace() {
         `/api/ai-trade/decisions/${decisionId}/${executeOrder ? "execute" : "apply"}`,
         { method: "POST" }
       );
-      await Promise.all([loadAiTradeDecisions(selectedCode), loadPaperPortfolio(), loadDetail()]);
+      await Promise.all([loadAiTradeDecisions(selectedCode), loadPaperPortfolio(), loadDetail(), loadTradeRecommendations()]);
       message.success(executeOrder ? "AI 建议已执行到模拟盘" : "AI 建议已套用到交易计划");
     } catch (error) {
       message.error(error.message || "处理 AI 建议失败");
@@ -636,6 +703,8 @@ export default function StockWorkspace() {
   const pageTitle =
     activeMenu === "watch"
       ? "我的自选"
+      : activeMenu === "changes"
+        ? "盘中异动"
       : activeMenu === "analysis"
         ? "AI分析"
         : activeMenu === "paper"
@@ -644,6 +713,8 @@ export default function StockWorkspace() {
   const pageSubtitle =
     activeMenu === "watch"
       ? "这里只显示你主动加入的自选股"
+      : activeMenu === "changes"
+        ? "实时异动信号与本地历史沉淀"
       : activeMenu === "analysis"
         ? ""
         : activeMenu === "paper"
@@ -652,7 +723,7 @@ export default function StockWorkspace() {
 
   return (
     <Layout className="app-shell">
-      <Sider width={208} breakpoint="lg" collapsedWidth={0} className="app-sider">
+      <Sider width={164} breakpoint="lg" collapsedWidth={0} className="app-sider">
         <div className="brand-box">
           <div className="brand-icon">股</div>
           <div>
@@ -673,7 +744,7 @@ export default function StockWorkspace() {
 
       <Layout>
         <Header className="top-header">
-          <div>
+          <div className="page-heading-inline">
             <Title level={4} style={{ margin: 0 }}>
               {pageTitle}
             </Title>
@@ -723,7 +794,7 @@ export default function StockWorkspace() {
             <>
               {activeMenu === "all" ? (
                 <>
-                  <MarketOverviewPanel summary={summary} />
+                  <MarketOverviewPanel summary={summary} onSelectCode={handleOpenDetail} />
                 </>
               ) : null}
 
@@ -741,14 +812,22 @@ export default function StockWorkspace() {
                   />
                 </div>
               ) : null}
+              {activeMenu === "changes" ? (
+                <StockChangesPanel onSelectCode={handleOpenDetail} />
+              ) : null}
               {activeMenu === "paper" ? (
                 <PaperPortfolioPanel
                   portfolio={paperPortfolio}
                   loading={paperLoading}
+                  recommendations={tradeRecommendations}
+                  recommendationSummary={tradeRecommendationSummary}
+                  recommendationLoading={tradeRecommendationLoading}
                   onSelectCode={handleOpenDetail}
                   onOpenReview={handleOpenReview}
+                  onQuickTrade={handleQuickTrade}
+                  onRefreshRecommendations={loadTradeRecommendations}
                 />
-              ) : activeMenu === "analysis" ? null : (
+              ) : activeMenu === "analysis" || activeMenu === "changes" ? null : (
                 <StockTable
                   title={pageTitle}
                   items={items}
@@ -767,6 +846,7 @@ export default function StockWorkspace() {
                   tradeQuantities={tradeQuantities}
                   onTradeQuantityChange={handleTradeQuantityChange}
                   showTradeActions={activeMenu === "watch"}
+                  marketStatus={paperMarketStatus}
                   controls={renderToolbar()}
                 />
               )}

@@ -8,15 +8,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .ai_trade import apply_ai_trade_decision, generate_ai_trade_decision, list_ai_trade_decisions
+from .ai_trade import (
+    apply_ai_trade_decision,
+    generate_ai_trade_decision,
+    generate_trade_recommendations,
+    list_ai_trade_decisions,
+)
 from .api_queries import load_ai_screening, load_market_overview, load_market_page, load_stock_detail
 from .backtesting import run_backtest
 from .db import init_db
 from .eastmoney_kline import fetch_stock_kline
+from .market_clock import get_a_share_market_status
 from .paper_trading import execute_paper_order, get_paper_portfolio, update_trade_review, upsert_trade_plan
 from .screening_chat_history import load_screening_chat_history, save_screening_chat_history
 from .screening_ai import analyze_screening_chat, stream_screening_chat
 from .stock_market import sync_stock_market_snapshot
+from .stock_changes import load_stock_change_history, load_stock_change_types, sync_stock_changes
 from .watchlist import delete_watchlist_item, update_watchlist_targets
 
 
@@ -112,6 +119,7 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    get_a_share_market_status(refresh_if_missing=True)
 
 
 @app.get("/api/health")
@@ -264,6 +272,50 @@ def refresh_stocks(payload: RefreshRequest) -> dict[str, object]:
     )
 
 
+@app.get("/api/stock-changes/types")
+def stock_change_types() -> dict[str, object]:
+    return load_stock_change_types()
+
+
+@app.get("/api/stock-changes")
+def stock_changes(
+    change_types: str = "",
+    page: int = 1,
+    page_size: int = 80,
+    persist: bool = True,
+) -> dict[str, object]:
+    try:
+        return sync_stock_changes(
+            change_types=change_types,
+            page=page,
+            page_size=page_size,
+            persist=persist,
+        )
+    except Exception as error:  # pragma: no cover - upstream response instability
+        raise HTTPException(status_code=502, detail=f"获取盘中异动失败：{error}") from error
+
+
+@app.get("/api/stock-changes/history")
+def stock_change_history(
+    page: int = 1,
+    page_size: int = 80,
+    keyword: str = "",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    direction: Literal["all", "bullish", "bearish", "neutral"] = "all",
+    change_types: str = "",
+) -> dict[str, object]:
+    return load_stock_change_history(
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        start_date=start_date,
+        end_date=end_date,
+        direction=direction,
+        change_types=change_types,
+    )
+
+
 @app.get("/api/stocks/{stock_code}")
 def stock_detail(stock_code: str) -> dict[str, object]:
     result = load_stock_detail(stock_code)
@@ -297,6 +349,11 @@ def paper_portfolio() -> dict[str, object]:
     return get_paper_portfolio()
 
 
+@app.get("/api/market/status")
+def market_status() -> dict[str, object]:
+    return get_a_share_market_status(refresh_if_missing=True)
+
+
 @app.get("/api/ai-trade/decisions")
 def ai_trade_decisions(
     stock_code: str | None = None,
@@ -308,6 +365,11 @@ def ai_trade_decisions(
             limit=limit,
         )
     }
+
+
+@app.get("/api/ai-trade/recommendations")
+def ai_trade_recommendations(limit: int = 6) -> dict[str, object]:
+    return generate_trade_recommendations(limit=limit)
 
 
 @app.post("/api/ai-trade/decisions/{stock_code}")

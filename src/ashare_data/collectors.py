@@ -67,11 +67,14 @@ def fetch_daily_bars(
             ]
             return frame[ordered_columns]
 
-        frame = fetch_baostock_daily_bars(
-            stock_code=stock_code,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        try:
+            frame = fetch_baostock_daily_bars(
+                stock_code=stock_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception:
+            frame = pd.DataFrame()
         if not frame.empty:
             frame["adjust_type"] = adjust_type
             frame["k_type"] = k_type
@@ -108,13 +111,16 @@ def fetch_daily_bars(
     source = "adata"
     for fetcher in fetchers:
         for _ in range(2):
-            result = fetcher(
-                stock_code=stock_code,
-                start_date=start_date,
-                end_date=end_date,
-                k_type=k_type,
-                adjust_type=adjust_type,
-            )
+            try:
+                result = fetcher(
+                    stock_code=stock_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    k_type=k_type,
+                    adjust_type=adjust_type,
+                )
+            except Exception:
+                result = None
             frame = result.copy() if result is not None else pd.DataFrame()
             if not frame.empty:
                 break
@@ -123,11 +129,14 @@ def fetch_daily_bars(
             break
 
     if frame.empty:
-        frame = fetch_tushare_daily_bars(
-            stock_code=stock_code,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        try:
+            frame = fetch_tushare_daily_bars(
+                stock_code=stock_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception:
+            frame = pd.DataFrame()
         source = "tushare"
 
     if frame.empty:

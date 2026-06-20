@@ -19,19 +19,19 @@ export default function StockTable({
   tradeQuantities,
   onTradeQuantityChange,
   showTradeActions,
+  marketStatus,
   controls,
 }) {
+  const marketOpen = marketStatus?.is_open === true;
   const columns = [
     {
       title: "股票",
       key: "stock",
       render: (_, record) => (
-        <Space direction="vertical" size={0}>
+        <Space size={5} className="dense-cell-line">
           <Text strong>{record.stock_name}</Text>
-          <Space size={6}>
-            <Text code>{record.stock_code}</Text>
-            <Text type="secondary">{record.market}</Text>
-          </Space>
+          <Text code>{record.stock_code}</Text>
+          <Text type="secondary">{record.market}</Text>
         </Space>
       ),
     },
@@ -39,7 +39,7 @@ export default function StockTable({
       title: "行情",
       key: "quote",
       render: (_, record) => (
-        <Space direction="vertical" size={0}>
+        <Space size={6} className="dense-cell-line">
           <Text strong>{numberText(record.price)}</Text>
           <Text style={colorStyle(record.change_pct)}>{percentText(record.change_pct)}</Text>
         </Space>
@@ -49,8 +49,8 @@ export default function StockTable({
       title: "活跃度",
       key: "activity",
       render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Text>换手率 {percentText(record.turnover_ratio)}</Text>
+        <Space size={7} className="dense-cell-line">
+          <Text>换手 {percentText(record.turnover_ratio)}</Text>
           <Text type="secondary">量比 {numberText(record.volume_ratio)}</Text>
         </Space>
       ),
@@ -59,11 +59,10 @@ export default function StockTable({
       title: "交易计划",
       key: "plan",
       render: (_, record) => (
-        <Space direction="vertical" size={0}>
+        <Space size={7} className="dense-cell-line">
           <Text>买入 {numberText(record.buy_price)}</Text>
-          <Text type="secondary">
-            止盈 {numberText(record.take_profit_price)} / 止损 {numberText(record.stop_loss_price)}
-          </Text>
+          <Text type="secondary">盈 {numberText(record.take_profit_price)}</Text>
+          <Text type="secondary">损 {numberText(record.stop_loss_price)}</Text>
         </Space>
       ),
     },
@@ -71,11 +70,10 @@ export default function StockTable({
       title: "估值与市值",
       key: "valuation",
       render: (_, record) => (
-        <Space direction="vertical" size={0}>
-          <Text>
-            PE {numberText(record.pe_ratio)} / PB {numberText(record.pb_ratio)}
-          </Text>
-          <Text type="secondary">总市值 {capText(record.total_market_value)}</Text>
+        <Space size={7} className="dense-cell-line">
+          <Text>PE {numberText(record.pe_ratio)}</Text>
+          <Text>PB {numberText(record.pb_ratio)}</Text>
+          <Text type="secondary">{capText(record.total_market_value)}</Text>
         </Space>
       ),
     },
@@ -94,6 +92,7 @@ export default function StockTable({
                 <Button
                   size="small"
                   type="primary"
+                  disabled={!marketOpen}
                   onClick={(event) => {
                     event.stopPropagation();
                     const quantity = tradeQuantities?.[record.stock_code] ?? record.default_trade_quantity ?? 100;
@@ -104,6 +103,7 @@ export default function StockTable({
                 </Button>
                 <Button
                   size="small"
+                  disabled={!marketOpen}
                   onClick={(event) => {
                     event.stopPropagation();
                     const quantity = tradeQuantities?.[record.stock_code] ?? record.default_trade_quantity ?? 100;

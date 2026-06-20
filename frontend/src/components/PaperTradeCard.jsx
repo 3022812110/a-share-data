@@ -1,4 +1,4 @@
-import { Button, Card, Form, Input, InputNumber, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, InputNumber, Space, Tag, Typography } from "antd";
 
 import { numberText } from "../lib/formatters";
 import { resolveModelLabel, resolveProviderLabel } from "../lib/aiModelSettings";
@@ -63,6 +63,8 @@ export default function PaperTradeCard({
   onExecuteAiTradeDecision,
 }) {
   const account = portfolio?.account ?? {};
+  const marketStatus = portfolio?.market_status ?? {};
+  const marketOpen = marketStatus.is_open === true;
   const quickTradeQuantity = Math.max(100, Number(snapshot.default_trade_quantity) || 100);
   const modelSummary = `${resolveProviderLabel(modelSettings.provider)} · ${resolveModelLabel(
     modelSettings.provider,
@@ -152,7 +154,7 @@ export default function PaperTradeCard({
                         type="primary"
                         onClick={() => onExecuteAiTradeDecision(decision.id)}
                         loading={aiTradeActing === `execute-${decision.id}`}
-                        disabled={!canExecute}
+                        disabled={!canExecute || !marketOpen}
                       >
                         执行到模拟盘
                       </Button>
@@ -178,14 +180,28 @@ export default function PaperTradeCard({
           <div className="trade-account-pill">
             <Text type="secondary">当前持仓</Text>
             <Text strong>
-              {snapshot.paper_quantity ? `${snapshot.paper_quantity} 股 / 成本 ${numberText(snapshot.paper_avg_cost)}` : "暂无持仓"}
+              {snapshot.paper_quantity
+                ? `${snapshot.paper_quantity} 股 / 买入均价 ${numberText(snapshot.paper_avg_cost)}`
+                : "暂无持仓"}
             </Text>
           </div>
         </div>
 
+        <Alert
+          showIcon
+          type={marketOpen ? "success" : "warning"}
+          message={marketOpen ? "A股交易中" : marketStatus.reason ?? "正在确认 A 股交易状态"}
+          description={
+            marketStatus.next_open
+              ? `北京时间 ${marketStatus.current_time ?? "--"}，下次开市 ${marketStatus.next_open}`
+              : `交易时段：09:30–11:30、13:00–15:00`
+          }
+        />
+
         <Space wrap className="trade-shortcuts">
           <Button
             type="primary"
+            disabled={!marketOpen}
             onClick={() =>
               onQuickTrade(
                 snapshot.stock_code,
@@ -199,6 +215,7 @@ export default function PaperTradeCard({
             {snapshot.in_watchlist ? `一键买入自选 ${quickTradeQuantity} 股` : `一键买入 ${quickTradeQuantity} 股`}
           </Button>
           <Button
+            disabled={!marketOpen}
             onClick={() => onQuickTrade(snapshot.stock_code, "sell", quickTradeQuantity, `一键卖出 ${quickTradeQuantity} 股`)}
             loading={paperOrdering}
           >
@@ -236,10 +253,10 @@ export default function PaperTradeCard({
             <Input.TextArea autoSize={{ minRows: 1, maxRows: 2 }} placeholder="补充交易计划、观察点和风险项" />
           </Form.Item>
           <Space wrap>
-            <Button type="primary" onClick={() => onPaperOrder("buy")} loading={paperOrdering}>
+            <Button type="primary" onClick={() => onPaperOrder("buy")} loading={paperOrdering} disabled={!marketOpen}>
               按填写数量买入
             </Button>
-            <Button onClick={() => onPaperOrder("sell")} loading={paperOrdering}>
+            <Button onClick={() => onPaperOrder("sell")} loading={paperOrdering} disabled={!marketOpen}>
               按填写数量卖出
             </Button>
             <Button onClick={onSavePlan} loading={planSaving}>

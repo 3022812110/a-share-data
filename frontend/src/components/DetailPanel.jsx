@@ -58,9 +58,11 @@ export default function DetailPanel({
   const concepts = feeds.concepts ?? [];
   const financialReports = feeds.financial_reports ?? [];
   const holderNumbers = feeds.holder_numbers ?? [];
+  const marginFinancing = feeds.margin_financing ?? [];
   const latestCapitalFlow = capitalFlows[0] ?? null;
   const latestFinancial = financialReports[0] ?? null;
   const latestHolder = holderNumbers[0] ?? null;
+  const latestMarginFinancing = marginFinancing[0] ?? null;
   const defaultTradeQuantity = Math.max(100, Number(snapshot?.default_trade_quantity) || 100);
   const [activeTab, setActiveTab] = React.useState("chart");
   const verdictTone =
@@ -354,7 +356,7 @@ export default function DetailPanel({
   );
 
   const moneyCard = (
-    <Card key="money" size="small" title="资金流 / 龙虎榜">
+    <Card key="money" size="small" title="资金流 / 融资融券 / 龙虎榜">
       <Space direction="vertical" size={14} style={{ width: "100%" }}>
         <div className="feed-section">
           <div className="feed-section-head">
@@ -415,6 +417,51 @@ export default function DetailPanel({
             </>
           ) : (
             <Alert type="info" showIcon message="暂未获取到个股资金流数据。" />
+          )}
+        </div>
+
+        <div className="feed-section">
+          <div className="feed-section-head">
+            <Text strong>融资融券</Text>
+            <Tag>{marginFinancing.length} 日</Tag>
+          </div>
+          {latestMarginFinancing ? (
+            <>
+              <div className="money-flow-grid margin-financing-grid">
+                <div className="bar-row">
+                  <Text type="secondary">日期</Text>
+                  <Text strong>{latestMarginFinancing.trade_date?.slice(0, 10) ?? "--"}</Text>
+                </div>
+                <div className="bar-row">
+                  <Text type="secondary">融资余额</Text>
+                  <Text strong>{yuanToYiText(latestMarginFinancing.financing_balance)}</Text>
+                </div>
+                <div className="bar-row">
+                  <Text type="secondary">融资净买入</Text>
+                  <Text strong style={colorStyle(latestMarginFinancing.financing_net_buy_amount)}>
+                    {yuanToYiText(latestMarginFinancing.financing_net_buy_amount)}
+                  </Text>
+                </div>
+                <div className="bar-row">
+                  <Text type="secondary">两融余额</Text>
+                  <Text strong>{yuanToYiText(latestMarginFinancing.margin_balance)}</Text>
+                </div>
+              </div>
+              <div className="feed-list compact">
+                {marginFinancing.slice(0, 6).map((item) => (
+                  <div className="feed-item compact financing-history-row" key={`margin-${item.trade_date}`}>
+                    <Text strong>{item.trade_date?.slice(0, 10)}</Text>
+                    <Text type="secondary">融资买入 {yuanToYiText(item.financing_buy_amount)}</Text>
+                    <Text type="secondary">偿还 {yuanToYiText(item.financing_repay_amount)}</Text>
+                    <Text style={colorStyle(item.financing_net_buy_amount)}>
+                      净买 {yuanToYiText(item.financing_net_buy_amount)}
+                    </Text>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <Alert type="info" showIcon message="该股票暂无融资融券数据，可能不是两融标的。" />
           )}
         </div>
 
@@ -688,6 +735,17 @@ export default function DetailPanel({
       { key: "profile", label: "资料", children: profileCard },
     ],
     analysis: [
+      { key: "chart", label: "K线", children: chartCard },
+      { key: "money", label: "资金", children: moneyCard },
+      { key: "fundamentals", label: "题材/财务", children: fundamentalsCard },
+      { key: "feeds", label: "资讯", children: feedsCard },
+      { key: "research", label: "研究卡", children: researchCard },
+      { key: "trade", label: "AI交易", children: tradeCard },
+      { key: "backtest", label: "回测", children: backtestCard },
+      { key: "watchlist", label: "自选设置", children: watchlistCard },
+      { key: "profile", label: "资料", children: profileCard },
+    ],
+    changes: [
       { key: "chart", label: "K线", children: chartCard },
       { key: "money", label: "资金", children: moneyCard },
       { key: "fundamentals", label: "题材/财务", children: fundamentalsCard },

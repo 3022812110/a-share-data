@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .db import get_connection, init_db
+from .market_clock import china_now_str, get_a_share_market_status, require_a_share_market_open
 from .watchlist import normalize_stock_code
 
 
@@ -133,7 +134,7 @@ def _trade_rules_payload() -> dict[str, object]:
         "stamp_duty_rate": STAMP_DUTY_RATE,
         "transfer_fee_rate": TRANSFER_FEE_RATE,
         "slippage_rate": SLIPPAGE_RATE,
-        "summary": "模拟盘按A股整手交易、T+1、双边佣金+过户费、卖出印花税、固定滑点执行。",
+        "summary": "模拟盘按A股交易日与交易时段、整手交易、T+1、双边佣金+过户费、卖出印花税、固定滑点执行。",
     }
 
 
@@ -514,6 +515,7 @@ def get_paper_portfolio(account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, objec
         },
         "positions": positions,
         "trades": trades,
+        "market_status": get_a_share_market_status(),
     }
 
 
@@ -529,6 +531,7 @@ def execute_paper_order(
     account_id: str = DEFAULT_ACCOUNT_ID,
 ) -> dict[str, object]:
     init_db()
+    market_status = require_a_share_market_open()
     normalized_code = normalize_stock_code(stock_code)
     normalized_side = side.strip().lower()
     if normalized_side not in {"buy", "sell"}:
@@ -552,8 +555,8 @@ def execute_paper_order(
             raise ValueError("price must be greater than 0")
 
         now = _utc_now_str()
-        trade_time = snapshot["trade_time"] or now
-        trade_date = _trade_date_from_text(trade_time, now)
+        trade_time = china_now_str()
+        trade_date = str(market_status["trade_date"])
         estimate = _estimate_trade(quoted_price, normalized_quantity, side=normalized_side, market=snapshot["market"])
         active_plan = _active_plan(connection, account_id, normalized_code)
         cash_balance = float(account["cash_balance"])

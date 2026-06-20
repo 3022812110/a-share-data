@@ -169,7 +169,10 @@ def get_stock_profile(stock_code: str, *, max_age_hours: int = 24) -> dict[str, 
         if datetime.utcnow() - updated_at.replace(tzinfo=None) <= timedelta(hours=max_age_hours):
             return json.loads(cached["payload_json"])
 
-    profile = fetch_akshare_stock_profile(normalized_code)
+    try:
+        profile = fetch_akshare_stock_profile(normalized_code)
+    except Exception:
+        return json.loads(cached["payload_json"]) if cached else {}
     if profile:
         with get_connection() as connection:
             connection.execute(

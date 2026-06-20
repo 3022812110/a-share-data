@@ -5,6 +5,7 @@ from typing import Any
 
 from .api_queries import load_stock_detail
 from .db import get_connection, init_db
+from .market_feeds import load_market_insights
 from .paper_trading import DEFAULT_ACCOUNT_ID, execute_paper_order, get_paper_portfolio, upsert_trade_plan
 from .screening_ai import (
     API_KEY_REQUIRED_PROVIDERS,
@@ -106,6 +107,390 @@ def get_latest_ai_trade_decision(
 ) -> dict[str, Any] | None:
     decisions = list_ai_trade_decisions(account_id=account_id, stock_code=stock_code, limit=1)
     return decisions[0] if decisions else None
+
+
+def generate_trade_recommendations(
+    *,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    limit: int = 6,
+) -> dict[str, Any]:
+    """Build deterministic account-level training recommendations from local market data."""
+    init_db()
+    portfolio = get_paper_portfolio(account_id=account_id)
+    account = portfolio.get("account") or {}
+    cash_balance = float(account.get("cash_balance") or 0)
+    total_assets = float(account.get("total_assets") or cash_balance or 0)
+    target_limit = max(1, min(int(limit or 6), 12))
+
+    with get_connection() as connection:
+        market_row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS stock_count,
+                SUM(CASE WHEN change_pct > 0 THEN 1 ELSE 0 END) AS rising_count,
+                SUM(CASE WHEN change_pct < 0 THEN 1 ELSE 0 END) AS falling_count,
+                SUM(CASE WHEN change_pct >= 9.8 THEN 1 ELSE 0 END) AS limit_up_count,
+                SUM(CASE WHEN change_pct <= -9.8 THEN 1 ELSE 0 END) AS limit_down_count,
+                ROUND(SUM(COALESCE(amount, 0)) / 10000, 2) AS turnover_yi,
+                MAX(trade_time) AS latest_trade_time,
+                MAX(fetched_at) AS latest_fetch
+            FROM stock_market_snapshot
+            WHERE market IN ('SH', 'SZ')
+            """
+        ).fetchone()
+        candidate_rows = connection.execute(
+            """
+            SELECT
+                s.stock_code,
+                s.market,
+                s.stock_name,
+                s.price,
+                s.change_pct,
+                s.turnover_ratio,
+                s.volume_ratio,
+                s.pe_ratio,
+                s.pb_ratio,
+                s.amount,
+                s.total_market_value,
+                s.trade_time,
+                s.fetched_at
+            FROM stock_market_snapshot s
+            WHERE s.market IN ('SH', 'SZ')
+              AND s.price BETWEEN 5 AND 150
+              AND s.change_pct BETWEEN 2 AND 8.5
+              AND s.turnover_ratio BETWEEN 3 AND 18
+              AND s.volume_ratio BETWEEN 0.9 AND 3.2
+              AND s.amount >= 50000
+              AND s.total_market_value BETWEEN 80 AND 5000
+              AND s.stock_name NOT LIKE '%ST%'
+              AND s.stock_name NOT LIKE 'C%'
+              AND (
+                  s.pe_ratio IS NULL
+                  OR (s.pe_ratio > 0 AND s.pe_ratio <= 100)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM paper_positions p
+                  WHERE p.account_id = ?
+                    AND p.stock_code = s.stock_code
+              )
+            ORDER BY s.amount DESC
+            LIMIT 180
+            """,
+            (account_id,),
+        ).fetchall()
+
+    market_context = _build_recommendation_market_context(market_row)
+    try:
+        insights = load_market_insights(max_age_seconds=900)
+    except Exception:
+        insights = {}
+    topic_context = _build_recommendation_topic_context(insights)
+
+    scored_candidates = []
+    for row in candidate_rows:
+        candidate = dict(row)
+        theme_tags = _infer_theme_tags(candidate["stock_name"], candidate["stock_code"])
+        score = _score_recommendation_candidate(
+            candidate,
+            market_context=market_context,
+            theme_tags=theme_tags,
+            topic_context=topic_context,
+            total_assets=total_assets,
+        )
+        candidate["score"] = score
+        candidate["theme_tags"] = theme_tags
+        scored_candidates.append(candidate)
+
+    scored_candidates.sort(key=lambda item: (item["score"], item.get("amount") or 0), reverse=True)
+
+    target_deploy_cash = max(0.0, min(cash_balance * 0.7, total_assets * 0.7))
+    per_position_cap = max(0.0, min(cash_balance * 0.3, total_assets * 0.25))
+    planned_cash = 0.0
+    recommendations: list[dict[str, Any]] = []
+
+    for candidate in scored_candidates:
+        if len(recommendations) >= target_limit:
+            break
+        remaining_budget = target_deploy_cash - planned_cash
+        if remaining_budget <= 0:
+            break
+
+        price = float(candidate.get("price") or 0)
+        if price <= 0:
+            continue
+        lot_cash = price * 100
+        if lot_cash > cash_balance - planned_cash:
+            continue
+        if lot_cash > total_assets * 0.35:
+            continue
+
+        quantity_budget = min(per_position_cap, remaining_budget)
+        quantity = int(quantity_budget // price // 100) * 100
+        if quantity < 100:
+            quantity = 100 if lot_cash <= remaining_budget else 0
+        if quantity < 100:
+            continue
+
+        recommendation = _build_recommendation_item(
+            candidate,
+            quantity=quantity,
+            market_context=market_context,
+            topic_context=topic_context,
+            total_assets=total_assets,
+        )
+        recommendations.append(recommendation)
+        planned_cash += float(recommendation["estimated_cash"])
+
+    return {
+        "account": {
+            "cash_balance": round(cash_balance, 2),
+            "total_assets": round(total_assets, 2),
+            "target_deploy_cash": round(target_deploy_cash, 2),
+            "planned_cash": round(planned_cash, 2),
+            "planned_position_pct": round((planned_cash / total_assets) * 100, 2) if total_assets else 0,
+        },
+        "market_context": market_context,
+        "topic_context": topic_context,
+        "recommendations": recommendations,
+        "rules": [
+            "9:35 后再确认盘面，不用集合竞价冲进去。",
+            "单票高开超过 4% 先跳过，等回落或下一次信号。",
+            "模拟账户优先训练仓位和止损，不用急着把上一笔亏损赚回来。",
+            "盘后模拟提前买入可以复盘，但要标记为盘后单，避免和次日真实开盘买点混在一起。",
+        ],
+    }
+
+
+def _build_recommendation_market_context(row) -> dict[str, Any]:
+    market = dict(row) if row else {}
+    stock_count = int(market.get("stock_count") or 0)
+    rising_count = int(market.get("rising_count") or 0)
+    falling_count = int(market.get("falling_count") or 0)
+    limit_up_count = int(market.get("limit_up_count") or 0)
+    limit_down_count = int(market.get("limit_down_count") or 0)
+    rising_ratio = round((rising_count / stock_count) * 100, 2) if stock_count else 0
+    turnover_yi = float(market.get("turnover_yi") or 0)
+
+    if rising_ratio >= 65 and limit_up_count >= max(30, limit_down_count * 8):
+        regime = "偏强"
+        strategy = "可做小仓顺势，但避免追高潮。"
+    elif rising_ratio <= 40 or limit_down_count > limit_up_count:
+        regime = "偏弱"
+        strategy = "以观察为主，只允许极小仓试错。"
+    else:
+        regime = "震荡"
+        strategy = "只做强主线低吸，减少后排交易。"
+
+    return {
+        "stock_count": stock_count,
+        "rising_count": rising_count,
+        "falling_count": falling_count,
+        "rising_ratio": rising_ratio,
+        "limit_up_count": limit_up_count,
+        "limit_down_count": limit_down_count,
+        "turnover_yi": round(turnover_yi, 2),
+        "latest_trade_time": market.get("latest_trade_time"),
+        "latest_fetch": market.get("latest_fetch"),
+        "regime": regime,
+        "strategy": strategy,
+    }
+
+
+def _build_recommendation_topic_context(insights: dict[str, Any]) -> dict[str, Any]:
+    hot_words = [
+        str(item.get("word") or "").strip()
+        for item in insights.get("hot_words") or []
+        if str(item.get("word") or "").strip()
+    ][:10]
+    hot_topics = [
+        {
+            "title": item.get("title"),
+            "stock_names": item.get("stock_names") or [],
+            "url": item.get("url"),
+        }
+        for item in (insights.get("hot_topics") or [])[:5]
+    ]
+    sector_rankings = insights.get("sector_rankings") or {}
+    sectors = [
+        str(item.get("name") or "").strip()
+        for item in [
+            *(sector_rankings.get("industry") or [])[:4],
+            *(sector_rankings.get("concept") or [])[:4],
+        ]
+        if str(item.get("name") or "").strip()
+    ]
+    sentiment = insights.get("sentiment") or {}
+    return {
+        "sentiment": {
+            "label": sentiment.get("label") or "中性",
+            "score": sentiment.get("score") or 50,
+            "description": sentiment.get("description") or "热点数据不足，按盘面强弱处理。",
+        },
+        "hot_words": hot_words,
+        "hot_topics": hot_topics,
+        "sectors": sectors,
+        "generated_at": insights.get("generated_at"),
+    }
+
+
+def _infer_theme_tags(stock_name: str, stock_code: str) -> list[str]:
+    name = str(stock_name or "")
+    code = str(stock_code or "")
+    tags: list[str] = []
+    theme_keywords = [
+        ("算力通信", ("网宿", "中际", "新易盛", "天孚", "光迅", "亨通", "长飞", "通信", "光电", "光纤", "数据")),
+        ("半导体电子", ("长电", "通富", "华天", "晶方", "兆易", "澜起", "聚辰", "江波龙", "芯", "微电", "电子", "封测", "半导体")),
+        ("AI应用", ("蓝色光标", "传媒", "软件", "信息", "智能")),
+        ("新能源", ("宁德", "欣旺达", "鹏辉", "金风", "风电", "锂", "电气", "电源", "储能", "光伏")),
+        ("高端制造", ("西电", "中材", "激光", "机器人", "航天", "军工")),
+        ("资源周期", ("铜", "锡", "钴", "稀土", "矿", "材料")),
+    ]
+    for tag, keywords in theme_keywords:
+        if any(keyword in name for keyword in keywords):
+            tags.append(tag)
+    if code.startswith(("300", "301", "688")) and "成长股" not in tags:
+        tags.append("成长股")
+    return tags[:3]
+
+
+def _score_recommendation_candidate(
+    candidate: dict[str, Any],
+    *,
+    market_context: dict[str, Any],
+    theme_tags: list[str],
+    topic_context: dict[str, Any],
+    total_assets: float,
+) -> float:
+    price = float(candidate.get("price") or 0)
+    change_pct = float(candidate.get("change_pct") or 0)
+    turnover_ratio = float(candidate.get("turnover_ratio") or 0)
+    volume_ratio = float(candidate.get("volume_ratio") or 0)
+    pe_ratio = candidate.get("pe_ratio")
+    amount_yi = float(candidate.get("amount") or 0) / 10000
+    market_value = float(candidate.get("total_market_value") or 0)
+
+    score = 0.0
+    score += min(change_pct, 8) * 8
+    score += max(0.0, 28 - abs(turnover_ratio - 7) * 2.2)
+    score += max(0.0, 20 - abs(volume_ratio - 1.6) * 8)
+    score += min(amount_yi / 4, 28)
+    if 120 <= market_value <= 1200:
+        score += 18
+    elif 80 <= market_value < 120 or 1200 < market_value <= 3000:
+        score += 10
+    else:
+        score += 5
+
+    if pe_ratio is not None:
+        pe = float(pe_ratio)
+        if 0 < pe <= 60:
+            score += 12
+        elif 60 < pe <= 90:
+            score += 5
+
+    topic_text = " ".join(
+        [
+            *[str(item) for item in topic_context.get("hot_words") or []],
+            *[str(item) for item in topic_context.get("sectors") or []],
+        ]
+    )
+    if theme_tags:
+        score += 8
+    topic_matches = {
+        "算力通信": ("算力", "通信", "数据中心", "CPO", "光模块"),
+        "半导体电子": ("半导体", "芯片", "存储", "封测", "电子"),
+        "AI应用": ("AI", "人工智能", "传媒", "软件"),
+        "新能源": ("新能源", "锂", "储能", "光伏", "风电"),
+        "高端制造": ("机器人", "军工", "航天", "高端制造"),
+        "资源周期": ("有色", "铜", "锡", "钴", "稀土"),
+    }
+    if any(any(keyword in topic_text for keyword in topic_matches.get(tag, (tag,))) for tag in theme_tags):
+        score += 12
+    if any(tag in {"算力通信", "半导体电子", "AI应用"} for tag in theme_tags):
+        score += 8
+
+    if change_pct > 7:
+        score -= (change_pct - 7) * 4
+    if turnover_ratio > 14:
+        score -= (turnover_ratio - 14) * 1.5
+    if price * 100 > total_assets * 0.28:
+        score -= 16
+    if market_context.get("regime") == "偏弱":
+        score -= 10
+
+    return round(score, 2)
+
+
+def _build_recommendation_item(
+    candidate: dict[str, Any],
+    *,
+    quantity: int,
+    market_context: dict[str, Any],
+    topic_context: dict[str, Any],
+    total_assets: float,
+) -> dict[str, Any]:
+    price = float(candidate.get("price") or 0)
+    change_pct = float(candidate.get("change_pct") or 0)
+    turnover_ratio = float(candidate.get("turnover_ratio") or 0)
+    volume_ratio = float(candidate.get("volume_ratio") or 0)
+    amount_yi = round(float(candidate.get("amount") or 0) / 10000, 2)
+    stop_loss_pct = 0.065 if change_pct >= 5 or turnover_ratio >= 10 else 0.055
+    target_pct = 0.12 if change_pct >= 5 else 0.1
+    risk_level = "高" if change_pct >= 7 or turnover_ratio >= 12 else "中"
+    confidence = "中"
+    if market_context.get("regime") == "偏强" and amount_yi >= 20 and candidate.get("theme_tags"):
+        confidence = "高"
+
+    entry_zone_low = round(price * (0.985 if change_pct < 5 else 0.97), 2)
+    entry_zone_high = round(price * 1.015, 2)
+    estimated_cash = round(price * quantity, 2)
+    stop_loss_price = round(price * (1 - stop_loss_pct), 2)
+    take_profit_price = round(price * (1 + target_pct), 2)
+    position_pct = round((estimated_cash / total_assets) * 100, 2) if total_assets else 0
+    theme_tags = candidate.get("theme_tags") or ["活跃股"]
+
+    reasons = [
+        f"市场环境{market_context.get('regime')}，上涨家数占比 {market_context.get('rising_ratio')}%。",
+        f"个股涨幅 {change_pct:.2f}%，有强度但未进入 20cm 极端追高区。",
+        f"换手 {turnover_ratio:.2f}%，量比 {volume_ratio:.2f}，成交约 {amount_yi:.2f} 亿，流动性适合训练。",
+        f"主题标签：{'、'.join(theme_tags)}。",
+    ]
+
+    return {
+        "stock_code": candidate.get("stock_code"),
+        "market": candidate.get("market"),
+        "stock_name": candidate.get("stock_name"),
+        "action": "buy",
+        "price": round(price, 2),
+        "change_pct": round(change_pct, 2),
+        "turnover_ratio": round(turnover_ratio, 2),
+        "volume_ratio": round(volume_ratio, 2),
+        "pe_ratio": candidate.get("pe_ratio"),
+        "amount_yi": amount_yi,
+        "total_market_value": candidate.get("total_market_value"),
+        "score": candidate.get("score"),
+        "theme_tags": theme_tags,
+        "recommended_quantity": quantity,
+        "estimated_cash": estimated_cash,
+        "position_size_pct": position_pct,
+        "entry_zone_low": entry_zone_low,
+        "entry_zone_high": entry_zone_high,
+        "stop_loss_price": stop_loss_price,
+        "take_profit_price": take_profit_price,
+        "planned_holding_days": 3,
+        "confidence": confidence,
+        "risk_level": risk_level,
+        "entry_reason": f"{'、'.join(theme_tags)}方向活跃，放量上行但仓位可控。",
+        "invalidation_condition": "高开超过4%不追；跌破止损位、放量长阴或主题退潮则退出。",
+        "plan_note": "系统训练推荐：按小仓位试单，复盘重点看主线是否延续和止损是否执行。",
+        "reasons": reasons,
+        "news_context": {
+            "sentiment": topic_context.get("sentiment"),
+            "hot_words": topic_context.get("hot_words", [])[:6],
+            "hot_topics": topic_context.get("hot_topics", [])[:3],
+        },
+    }
 
 
 def apply_ai_trade_decision(
@@ -327,6 +712,7 @@ def _build_trade_user_prompt(
     notices = feeds.get("notices") or []
     reports = feeds.get("research_reports") or []
     telegraphs = feeds.get("telegraphs") or []
+    margin_financing = feeds.get("margin_financing") or []
 
     context = {
         "target_stock": {
@@ -386,6 +772,17 @@ def _build_trade_user_prompt(
                     "content": item.get("content"),
                 }
                 for item in telegraphs[:4]
+            ],
+            "margin_financing": [
+                {
+                    "trade_date": item.get("trade_date"),
+                    "financing_balance": item.get("financing_balance"),
+                    "financing_buy_amount": item.get("financing_buy_amount"),
+                    "financing_repay_amount": item.get("financing_repay_amount"),
+                    "financing_net_buy_amount": item.get("financing_net_buy_amount"),
+                    "margin_balance": item.get("margin_balance"),
+                }
+                for item in margin_financing[:5]
             ],
         },
         "portfolio_context": {

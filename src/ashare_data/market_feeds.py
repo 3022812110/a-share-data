@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 import html
 import re
@@ -8,6 +9,7 @@ from typing import Any
 
 import requests
 
+from .db import get_connection
 from .eastmoney_kline import stock_code_to_secid
 
 
@@ -281,6 +283,223 @@ def fetch_sector_money_ranks(*, category: str = "industry", limit: int = 8) -> l
     return items
 
 
+def fetch_stock_money_ranks(*, limit: int = 10) -> list[dict[str, Any]]:
+    response = _SESSION.get(
+        "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_ssggzj",
+        params={
+            "page": "1",
+            "num": str(max(1, min(limit, 50))),
+            "sort": "netamount",
+            "asc": "0",
+            "bankuai": "",
+            "shichang": "",
+        },
+        headers={
+            "Host": "vip.stock.finance.sina.com.cn",
+            "Referer": "https://finance.sina.com.cn/",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    rows = response.json() or []
+    items: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:limit], start=1):
+        symbol = str(row.get("symbol") or "")
+        items.append(
+            {
+                "rank": index,
+                "stock_code": _normalize_stock_code(symbol),
+                "stock_name": _strip_html(row.get("name")),
+                "price": _to_float(row.get("trade")),
+                "change_pct": (_to_float(row.get("changeratio")) or 0) * 100,
+                "turnover_yi": _value_to_yi(row.get("amount")),
+                "inflow_yi": _value_to_yi(row.get("inamount")),
+                "outflow_yi": _value_to_yi(row.get("outamount")),
+                "net_inflow_yi": _value_to_yi(row.get("netamount")),
+                "net_inflow_pct": (_to_float(row.get("ratioamount")) or 0) * 100,
+                "main_net_inflow_yi": _value_to_yi(row.get("r0_net")),
+                "main_net_inflow_pct": (_to_float(row.get("r0_ratio")) or 0) * 100,
+            }
+        )
+    return items
+
+
+def fetch_hot_stocks(*, market_type: str = "12", limit: int = 10) -> list[dict[str, Any]]:
+    _SESSION.get(
+        "https://xueqiu.com/hq#hot",
+        headers={
+            "Host": "xueqiu.com",
+            "Referer": "https://xueqiu.com/",
+        },
+        timeout=15,
+    ).raise_for_status()
+    response = _SESSION.get(
+        "https://stock.xueqiu.com/v5/stock/hot_stock/list.json",
+        params={
+            "page": "1",
+            "size": str(max(1, min(limit, 50))),
+            "_type": market_type,
+            "type": market_type,
+        },
+        headers={
+            "Host": "stock.xueqiu.com",
+            "Origin": "https://xueqiu.com",
+            "Referer": "https://xueqiu.com/",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    rows = ((response.json().get("data") or {}).get("items")) or []
+    items: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:limit], start=1):
+        items.append(
+            {
+                "rank": index,
+                "stock_code": _normalize_stock_code(str(row.get("code") or row.get("symbol") or "")),
+                "stock_name": _strip_html(row.get("name")),
+                "symbol": row.get("symbol") or row.get("code"),
+                "exchange": row.get("exchange"),
+                "heat": _to_float(row.get("value")),
+                "heat_change": _to_float(row.get("increment")),
+                "rank_change": _to_float(row.get("rank_change")),
+                "price": _to_float(row.get("current")),
+                "change_amount": _to_float(row.get("chg")),
+                "change_pct": _to_float(row.get("percent")),
+            }
+        )
+    return items
+
+
+def fetch_global_indices(*, per_region_limit: int = 12) -> dict[str, list[dict[str, Any]]]:
+    response = _SESSION.get(
+        "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/rank/indexRankDetail2",
+        headers={
+            "Host": "proxy.finance.qq.com",
+            "Referer": "https://stockapp.finance.qq.com/mstats",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    data = response.json().get("data") or {}
+    region_names = {
+        "common": "重点关注",
+        "asia": "亚洲",
+        "america": "美洲",
+        "europe": "欧洲",
+        "other": "其他",
+    }
+    result: dict[str, list[dict[str, Any]]] = {}
+    for region, region_name in region_names.items():
+        items = []
+        for row in (data.get(region) or [])[:per_region_limit]:
+            items.append(
+                {
+                    "code": str(row.get("code") or "").strip(),
+                    "quote_code": row.get("qtcode"),
+                    "name": _strip_html(row.get("name")),
+                    "location": _strip_html(row.get("location")),
+                    "price": _to_float(row.get("zxj")),
+                    "change_pct": _to_float(row.get("zdf")),
+                    "state": row.get("state"),
+                    "region": region,
+                    "region_name": region_name,
+                }
+            )
+        result[region] = items
+    return result
+
+
+def _latest_open_trade_date() -> str:
+    today = date.today().isoformat()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT MAX(trade_date) AS trade_date
+            FROM trade_calendar
+            WHERE trade_status = 1 AND trade_date <= ?
+            """,
+            (today,),
+        ).fetchone()
+        if row and row["trade_date"]:
+            return str(row["trade_date"])
+        snapshot = connection.execute(
+            "SELECT MAX(substr(trade_time, 1, 10)) AS trade_date FROM stock_market_snapshot"
+        ).fetchone()
+    if snapshot and snapshot["trade_date"]:
+        return str(snapshot["trade_date"])
+    candidate = date.today()
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate.isoformat()
+
+
+def fetch_market_long_tiger(*, trade_date: str | None = None, limit: int = 20) -> dict[str, Any]:
+    selected_date = trade_date or _latest_open_trade_date()
+    response = _SESSION.get(
+        "https://datacenter-web.eastmoney.com/api/data/v1/get",
+        params={
+            "sortColumns": "TURNOVERRATE,TRADE_DATE,SECURITY_CODE",
+            "sortTypes": "-1,-1,1",
+            "pageSize": str(max(1, min(limit * 4, 500))),
+            "pageNumber": "1",
+            "reportName": "RPT_DAILYBILLBOARD_DETAILSNEW",
+            "columns": (
+                "SECURITY_CODE,SECUCODE,SECURITY_NAME_ABBR,TRADE_DATE,EXPLAIN,CLOSE_PRICE,"
+                "CHANGE_RATE,BILLBOARD_NET_AMT,BILLBOARD_BUY_AMT,BILLBOARD_SELL_AMT,"
+                "BILLBOARD_DEAL_AMT,ACCUM_AMOUNT,DEAL_NET_RATIO,DEAL_AMOUNT_RATIO,"
+                "TURNOVERRATE,FREE_MARKET_CAP,EXPLANATION,D1_CLOSE_ADJCHRATE,"
+                "D2_CLOSE_ADJCHRATE,D5_CLOSE_ADJCHRATE,D10_CLOSE_ADJCHRATE,SECURITY_TYPE_CODE"
+            ),
+            "source": "WEB",
+            "client": "WEB",
+            "filter": f"(TRADE_DATE<='{selected_date}')(TRADE_DATE>='{selected_date}')",
+        },
+        headers={
+            "Host": "datacenter-web.eastmoney.com",
+            "Referer": "https://data.eastmoney.com/stock/tradedetail.html",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    rows = ((response.json().get("result") or {}).get("data")) or []
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        stock_code = _normalize_stock_code(str(row.get("SECURITY_CODE") or ""))
+        if not stock_code:
+            continue
+        item = merged.setdefault(
+            stock_code,
+            {
+                "stock_code": stock_code,
+                "stock_name": row.get("SECURITY_NAME_ABBR"),
+                "trade_date": str(row.get("TRADE_DATE") or "")[:10],
+                "close_price": _to_float(row.get("CLOSE_PRICE")),
+                "change_pct": _to_float(row.get("CHANGE_RATE")),
+                "net_amount_yi": _value_to_yi(row.get("BILLBOARD_NET_AMT")),
+                "buy_amount_yi": _value_to_yi(row.get("BILLBOARD_BUY_AMT")),
+                "sell_amount_yi": _value_to_yi(row.get("BILLBOARD_SELL_AMT")),
+                "deal_amount_yi": _value_to_yi(row.get("BILLBOARD_DEAL_AMT")),
+                "deal_net_ratio": _to_float(row.get("DEAL_NET_RATIO")),
+                "deal_amount_ratio": _to_float(row.get("DEAL_AMOUNT_RATIO")),
+                "turnover_ratio": _to_float(row.get("TURNOVERRATE")),
+                "explain": _strip_html(row.get("EXPLAIN")),
+                "reasons": [],
+                "next_1d_pct": _to_float(row.get("D1_CLOSE_ADJCHRATE")),
+                "next_5d_pct": _to_float(row.get("D5_CLOSE_ADJCHRATE")),
+            },
+        )
+        reason = _strip_html(row.get("EXPLANATION"))
+        if reason and reason not in item["reasons"]:
+            item["reasons"].append(reason)
+    items = list(merged.values())
+    items.sort(key=lambda item: abs(float(item.get("net_amount_yi") or 0)), reverse=True)
+    return {
+        "trade_date": selected_date,
+        "total": len(items),
+        "items": items[:limit],
+    }
+
+
 def _score_sentiment_text(text: str) -> float:
     score = 0.0
     for keyword, weight in _SENTIMENT_POSITIVE_KEYWORDS.items():
@@ -393,6 +612,26 @@ def load_market_insights(*, max_age_seconds: int = 300) -> dict[str, Any]:
     except Exception:
         concept_ranks = []
 
+    try:
+        stock_money_ranks = fetch_stock_money_ranks(limit=10)
+    except Exception:
+        stock_money_ranks = []
+
+    try:
+        hot_stocks = fetch_hot_stocks(market_type="12", limit=10)
+    except Exception:
+        hot_stocks = []
+
+    try:
+        global_indices = fetch_global_indices(per_region_limit=12)
+    except Exception:
+        global_indices = {}
+
+    try:
+        market_long_tiger = fetch_market_long_tiger(limit=20)
+    except Exception:
+        market_long_tiger = {"trade_date": None, "total": 0, "items": []}
+
     result = {
         "sentiment": _build_market_sentiment(telegraphs),
         "hot_words": _build_hot_words(telegraphs, limit=12),
@@ -401,6 +640,10 @@ def load_market_insights(*, max_age_seconds: int = 300) -> dict[str, Any]:
             "industry": industry_ranks,
             "concept": concept_ranks,
         },
+        "stock_money_rankings": stock_money_ranks,
+        "hot_stocks": hot_stocks,
+        "global_indices": global_indices,
+        "market_long_tiger": market_long_tiger,
         "telegraph_sample": [
             {
                 "title": item.get("title"),
@@ -808,56 +1051,74 @@ def fetch_stock_holder_numbers(stock_code: str, *, limit: int = 8) -> list[dict[
     return items
 
 
+def fetch_stock_margin_financing(stock_code: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    security_code = _normalize_stock_security_code(stock_code)
+    if not security_code:
+        return []
+
+    response = _SESSION.get(
+        "https://datacenter.eastmoney.com/securities/api/data/v1/get",
+        params={
+            "reportName": "RPT_RZRQ_STOCKS_DETAIL",
+            "columns": (
+                "MARKET_NAME,MARKET_CODE,TRADE_DATE,SECURITY_CODE,SECUCODE,"
+                "SECURITY_NAME_ABBR,FIN_BALANCE,FIN_BUY_AMT,FIN_REPAY_AMT,"
+                "LOAN_BALANCE,LOAN_SELL_VOL,LOAN_REPAY_VOL,MARGIN_BALANCE,"
+                "LOAN_BALANCE_VOL,FIN_NETBUY_AMT"
+            ),
+            "filter": f'(SECUCODE="{security_code}")',
+            "pageNumber": "1",
+            "pageSize": str(max(1, min(limit, 50))),
+            "sortTypes": "-1",
+            "sortColumns": "TRADE_DATE",
+            "source": "Datacenter",
+            "client": "PC",
+        },
+        headers={
+            "Host": "datacenter.eastmoney.com",
+            "Referer": "https://data.eastmoney.com/rzrq/detail/",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    rows = ((response.json().get("result") or {}).get("data")) or []
+    return [
+        {
+            "trade_date": row.get("TRADE_DATE"),
+            "financing_balance": _to_float(row.get("FIN_BALANCE")),
+            "financing_buy_amount": _to_float(row.get("FIN_BUY_AMT")),
+            "financing_repay_amount": _to_float(row.get("FIN_REPAY_AMT")),
+            "financing_net_buy_amount": _to_float(row.get("FIN_NETBUY_AMT")),
+            "securities_lending_balance": _to_float(row.get("LOAN_BALANCE")),
+            "securities_lending_sell_volume": _to_float(row.get("LOAN_SELL_VOL")),
+            "securities_lending_repay_volume": _to_float(row.get("LOAN_REPAY_VOL")),
+            "securities_lending_balance_volume": _to_float(row.get("LOAN_BALANCE_VOL")),
+            "margin_balance": _to_float(row.get("MARGIN_BALANCE")),
+        }
+        for row in rows[:limit]
+    ]
+
+
 def load_stock_event_feeds(stock_code: str, stock_name: str | None = None) -> dict[str, list[dict[str, Any]]]:
     news_keyword = (stock_name or "").strip() or _normalize_stock_code(stock_code)
-
-    try:
-        telegraphs = fetch_cls_stock_news(news_keyword)
-    except Exception:
-        telegraphs = []
-
-    try:
-        notices = fetch_stock_notices(stock_code)
-    except Exception:
-        notices = []
-
-    try:
-        reports = fetch_stock_research_reports(stock_code)
-    except Exception:
-        reports = []
-
-    try:
-        capital_flows = fetch_stock_capital_flows(stock_code)
-    except Exception:
-        capital_flows = []
-
-    try:
-        long_tiger = fetch_stock_long_tiger(stock_code)
-    except Exception:
-        long_tiger = []
-
-    try:
-        concepts = fetch_stock_concepts(stock_code)
-    except Exception:
-        concepts = []
-
-    try:
-        financial_reports = fetch_stock_financial_reports(stock_code)
-    except Exception:
-        financial_reports = []
-
-    try:
-        holder_numbers = fetch_stock_holder_numbers(stock_code)
-    except Exception:
-        holder_numbers = []
-
-    return {
-        "telegraphs": telegraphs,
-        "notices": notices,
-        "research_reports": reports,
-        "capital_flows": capital_flows,
-        "long_tiger": long_tiger,
-        "concepts": concepts,
-        "financial_reports": financial_reports,
-        "holder_numbers": holder_numbers,
+    fetchers = {
+        "telegraphs": lambda: fetch_cls_stock_news(news_keyword),
+        "notices": lambda: fetch_stock_notices(stock_code),
+        "research_reports": lambda: fetch_stock_research_reports(stock_code),
+        "capital_flows": lambda: fetch_stock_capital_flows(stock_code),
+        "long_tiger": lambda: fetch_stock_long_tiger(stock_code),
+        "concepts": lambda: fetch_stock_concepts(stock_code),
+        "financial_reports": lambda: fetch_stock_financial_reports(stock_code),
+        "holder_numbers": lambda: fetch_stock_holder_numbers(stock_code),
+        "margin_financing": lambda: fetch_stock_margin_financing(stock_code),
     }
+    result: dict[str, list[dict[str, Any]]] = {key: [] for key in fetchers}
+    with ThreadPoolExecutor(max_workers=len(fetchers), thread_name_prefix="stock-feed") as executor:
+        futures = {executor.submit(fetcher): key for key, fetcher in fetchers.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                result[key] = future.result()
+            except Exception:
+                result[key] = []
+    return result
