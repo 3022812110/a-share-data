@@ -1,5 +1,5 @@
 import React from "react";
-import { Button, Card, Space, Tag, Typography } from "antd";
+import { Badge, Button, Card, Space, Typography } from "antd";
 import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
 
 import DetailPanel from "./DetailPanel";
@@ -33,7 +33,7 @@ export default function StockDetailPage({
 
   return (
     <div className="detail-page-shell">
-      <Card bordered={false} className="detail-page-header detail-hero-card">
+      <Card variant="borderless" className="detail-page-header detail-hero-card">
         <div className="detail-page-header-row">
           <Space size={10}>
             <Button icon={<ArrowLeftOutlined />} onClick={onBack}>
@@ -45,12 +45,12 @@ export default function StockDetailPage({
                   {snapshot?.stock_name ?? snapshot?.display_name ?? snapshot?.stock_code ?? "单股详情"}
                 </Typography.Title>
                 {snapshot ? (
-                  <Tag color={Number(snapshot.change_pct) >= 0 ? "red" : "green"}>
+                  <Text strong className="detail-title-change" style={colorStyle(snapshot.change_pct)}>
                     {percentText(snapshot.change_pct)}
-                  </Tag>
+                  </Text>
                 ) : null}
-                {snapshot?.in_watchlist ? <Tag color="gold">自选</Tag> : null}
-                {aiView?.verdict ? <Tag color="blue">{aiView.verdict}</Tag> : null}
+                {snapshot?.in_watchlist ? <Badge color="#ff9f0a" text="自选" /> : null}
+                {aiView?.verdict ? <Badge color="#007aff" text={aiView.verdict} /> : null}
               </div>
               <Text type="secondary">
                 {snapshot

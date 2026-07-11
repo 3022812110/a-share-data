@@ -26,6 +26,7 @@ _SESSION.headers.update(
 )
 
 _MARKET_INSIGHTS_CACHE: dict[str, Any] = {"expires_at": None, "payload": None}
+_FUND_RANKING_CACHE: dict[str, dict[str, Any]] = {}
 
 _SENTIMENT_POSITIVE_KEYWORDS = {
     "涨停": 3.0,
@@ -322,6 +323,98 @@ def fetch_stock_money_ranks(*, limit: int = 10) -> list[dict[str, Any]]:
             }
         )
     return items
+
+
+def fetch_fund_ranking(*, period: str = "1d", limit: int = 200) -> dict[str, Any]:
+    """Load the public Eastmoney all-stock main-fund ranking.
+
+    Eastmoney exposes 1-day, 3-day and 10-day public windows. The UI keeps the
+    requested 13-day Compass-like research slot, but labels it as a public
+    10-day proxy so it is never confused with Compass' proprietary model.
+    """
+    period_config = {
+        "1d": {"field": "f62", "ratio": "f184", "label": "1日多空资金", "source_days": 1},
+        "3d": {"field": "f267", "ratio": "f268", "label": "3日多空资金", "source_days": 3},
+        "13d": {"field": "f174", "ratio": "f175", "label": "13日趋势资金", "source_days": 10},
+    }
+    config = period_config.get(period, period_config["1d"])
+    normalized_limit = max(20, min(int(limit), 500))
+    cache_key = f"{period}:{normalized_limit}"
+    cached = _FUND_RANKING_CACHE.get(cache_key)
+    now = datetime.now()
+    if cached and cached.get("expires_at") and cached["expires_at"] > now:
+        return cached["payload"]
+
+    response = _SESSION.get(
+        "https://push2delay.eastmoney.com/api/qt/clist/get",
+        params={
+            "pn": "1",
+            "pz": str(normalized_limit),
+            "po": "1",
+            "np": "1",
+            "fltt": "2",
+            "invt": "2",
+            "fid": config["field"],
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+            "fields": (
+                "f12,f14,f2,f3,f8,f17,f18,f62,f184,"
+                "f267,f268,f174,f175"
+            ),
+        },
+        headers={"Referer": "https://data.eastmoney.com/zjlx/"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    rows = ((response.json().get("data") or {}).get("diff")) or []
+
+    items: list[dict[str, Any]] = []
+    for index, row in enumerate(rows, start=1):
+        code = _normalize_stock_code(str(row.get("f12") or ""))
+        if not code:
+            continue
+        price = _to_float(row.get("f2"))
+        open_price = _to_float(row.get("f17"))
+        previous_close = _to_float(row.get("f18"))
+        opening_pct = None
+        if open_price is not None and previous_close not in (None, 0):
+            opening_pct = (open_price / previous_close - 1) * 100
+        net_value = _to_float(row.get(config["field"]))
+        ratio_value = _to_float(row.get(config["ratio"]))
+        market = "SH" if code.startswith("6") else "BJ" if code.startswith(("4", "8", "9")) else "SZ"
+        items.append(
+            {
+                "rank": index,
+                "stock_code": code,
+                "stock_name": _strip_html(row.get("f14")),
+                "market": market,
+                "price": price,
+                "open_price": open_price,
+                "opening_pct": opening_pct,
+                "change_pct": _to_float(row.get("f3")),
+                "turnover_ratio": _to_float(row.get("f8")),
+                "net_inflow": net_value,
+                "net_inflow_yi": net_value / 100000000 if net_value is not None else None,
+                "net_inflow_pct": ratio_value,
+                "direction": "long" if (net_value or 0) >= 0 else "short",
+            }
+        )
+
+    payload = {
+        "period": period,
+        "label": config["label"],
+        "source_days": config["source_days"],
+        "is_proxy": period == "13d",
+        "note": (
+            "使用公开10日主力净流入作为13日趋势观察代理，不等同于指南针专有敢死队算法。"
+            if period == "13d"
+            else "按公开主力净流入数据排序。"
+        ),
+        "source": "eastmoney",
+        "fetched_at": now.isoformat(timespec="seconds"),
+        "items": items,
+    }
+    _FUND_RANKING_CACHE[cache_key] = {"expires_at": now + timedelta(seconds=45), "payload": payload}
+    return payload
 
 
 def fetch_hot_stocks(*, market_type: str = "12", limit: int = 10) -> list[dict[str, Any]]:

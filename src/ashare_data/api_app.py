@@ -14,11 +14,17 @@ from .ai_trade import (
     generate_trade_recommendations,
     list_ai_trade_decisions,
 )
-from .api_queries import load_ai_screening, load_market_overview, load_market_page, load_stock_detail
+from .api_queries import load_ai_screening, load_fund_ranking, load_market_overview, load_market_page, load_stock_detail
 from .backtesting import run_backtest
 from .db import init_db
 from .eastmoney_kline import fetch_stock_kline
 from .market_clock import get_a_share_market_status
+from .data_health import load_data_health
+from .market_refresh_service import (
+    refresh_market_data,
+    start_market_refresh_scheduler,
+    stop_market_refresh_scheduler,
+)
 from .paper_trading import execute_paper_order, get_paper_portfolio, update_trade_review, upsert_trade_plan
 from .screening_chat_history import load_screening_chat_history, save_screening_chat_history
 from .screening_ai import analyze_screening_chat, stream_screening_chat
@@ -120,6 +126,12 @@ app.add_middleware(
 def on_startup() -> None:
     init_db()
     get_a_share_market_status(refresh_if_missing=True)
+    start_market_refresh_scheduler()
+
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    stop_market_refresh_scheduler()
 
 
 @app.get("/api/health")
@@ -130,6 +142,19 @@ def health() -> dict[str, str]:
 @app.get("/api/summary")
 def summary() -> dict[str, object]:
     return load_market_overview()
+
+
+@app.get("/api/data-health")
+def data_health() -> dict[str, object]:
+    return load_data_health()
+
+
+@app.get("/api/fund-ranking")
+def fund_ranking(
+    period: Literal["1d", "3d", "13d"] = "1d",
+    limit: int = 200,
+) -> dict[str, object]:
+    return load_fund_ranking(period=period, limit=limit)
 
 
 @app.get("/api/stocks")
@@ -266,6 +291,8 @@ def save_screening_history(payload: ScreeningChatHistoryRequest) -> dict[str, ob
 
 @app.post("/api/stocks/refresh")
 def refresh_stocks(payload: RefreshRequest) -> dict[str, object]:
+    if not payload.stock_codes and payload.trade_date is None:
+        return refresh_market_data()
     return sync_stock_market_snapshot(
         trade_date=payload.trade_date,
         stock_codes=payload.stock_codes,

@@ -1,7 +1,8 @@
-import { Alert, Button, Card, Form, Input, InputNumber, Space, Tag, Typography } from "antd";
+import { Button, Card, Form, Input, InputNumber, Space, Tag, Typography } from "antd";
 
 import { numberText } from "../lib/formatters";
 import { resolveModelLabel, resolveProviderLabel } from "../lib/aiModelSettings";
+import MarketStatusNotice from "./MarketStatusNotice";
 
 const { Text } = Typography;
 const ACTION_LABELS = {
@@ -104,15 +105,15 @@ export default function PaperTradeCard({
                   <div className="trade-ai-decision-card" key={decision.id}>
                     <div className="trade-ai-decision-top">
                       <Space wrap size={6}>
-                        <Tag color={ACTION_COLORS[decision.action] ?? "default"}>
+                        <Tag bordered={false} color={ACTION_COLORS[decision.action] ?? "default"}>
                           {ACTION_LABELS[decision.action] ?? decision.action}
                         </Tag>
-                        <Tag color={STATUS_COLORS[decision.status] ?? "default"}>
+                        <Tag bordered={false} color={STATUS_COLORS[decision.status] ?? "default"}>
                           {STATUS_LABELS[decision.status] ?? decision.status}
                         </Tag>
-                        <Tag>数量 {decision.quantity || 0} 股</Tag>
-                        <Tag>置信度 {decision.confidence ?? "--"}</Tag>
-                        <Tag>风险 {decision.risk_level ?? "--"}</Tag>
+                        <Tag bordered={false}>数量 {decision.quantity || 0} 股</Tag>
+                        <Tag bordered={false}>置信度 {decision.confidence ?? "--"}</Tag>
+                        <Tag bordered={false}>风险 {decision.risk_level ?? "--"}</Tag>
                       </Space>
                       <Text type="secondary">{formatDecisionTime(decision.created_at)}</Text>
                     </div>
@@ -120,9 +121,9 @@ export default function PaperTradeCard({
                     <Text strong>{decision.summary ?? "暂无结论"}</Text>
 
                     <div className="trade-ai-chip-wrap">
-                      {decision.stop_loss_price ? <Tag>止损 {numberText(decision.stop_loss_price, 2)}</Tag> : null}
-                      {decision.take_profit_price ? <Tag>止盈 {numberText(decision.take_profit_price, 2)}</Tag> : null}
-                      {decision.planned_holding_days ? <Tag>持有 {decision.planned_holding_days} 天</Tag> : null}
+                      {decision.stop_loss_price ? <Tag bordered={false}>止损 {numberText(decision.stop_loss_price, 2)}</Tag> : null}
+                      {decision.take_profit_price ? <Tag bordered={false}>止盈 {numberText(decision.take_profit_price, 2)}</Tag> : null}
+                      {decision.planned_holding_days ? <Tag bordered={false}>持有 {decision.planned_holding_days} 天</Tag> : null}
                     </div>
 
                     {decision.reasoning?.length ? (
@@ -135,7 +136,7 @@ export default function PaperTradeCard({
 
                     {decision.review_summary || decision.lessons_learned ? (
                       <div className="trade-ai-review-box">
-                        {decision.review_rating ? <Tag color="gold">复盘 {decision.review_rating}</Tag> : null}
+                        {decision.review_rating ? <Tag bordered={false} color="gold">复盘 {decision.review_rating}</Tag> : null}
                         {decision.exit_reason ? <Text type="secondary">卖出原因：{decision.exit_reason}</Text> : null}
                         {decision.review_summary ? <Text>复盘结论：{decision.review_summary}</Text> : null}
                         {decision.lessons_learned ? <Text type="secondary">下次改进：{decision.lessons_learned}</Text> : null}
@@ -187,16 +188,7 @@ export default function PaperTradeCard({
           </div>
         </div>
 
-        <Alert
-          showIcon
-          type={marketOpen ? "success" : "warning"}
-          message={marketOpen ? "A股交易中" : marketStatus.reason ?? "正在确认 A 股交易状态"}
-          description={
-            marketStatus.next_open
-              ? `北京时间 ${marketStatus.current_time ?? "--"}，下次开市 ${marketStatus.next_open}`
-              : `交易时段：09:30–11:30、13:00–15:00`
-          }
-        />
+        <MarketStatusNotice marketStatus={marketStatus} compact />
 
         <Space wrap className="trade-shortcuts">
           <Button

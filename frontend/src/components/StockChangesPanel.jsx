@@ -1,17 +1,20 @@
 import React from "react";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Input,
+  Segmented,
   Select,
   Space,
+  Statistic,
   Switch,
   Table,
   Tag,
   Typography,
 } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ArrowDownOutlined, ArrowUpOutlined, DatabaseOutlined, ReloadOutlined } from "@ant-design/icons";
 
 import { request } from "../lib/api";
 import { colorStyle, numberText, percentText } from "../lib/formatters";
@@ -45,10 +48,16 @@ function directionLabel(direction) {
   return "中性";
 }
 
-function directionColor(direction) {
-  if (direction === "bullish") return "red";
-  if (direction === "bearish") return "green";
-  return "blue";
+function directionDotColor(direction) {
+  if (direction === "bullish") return "#ff3b30";
+  if (direction === "bearish") return "#34c759";
+  return "#8e8e93";
+}
+
+function sameSelection(left, right) {
+  if (left.length !== right.length) return false;
+  const values = new Set(left);
+  return right.every((item) => values.has(item));
 }
 
 function buildQuery(params) {
@@ -155,6 +164,16 @@ export default function StockChangesPanel({ onSelectCode }) {
   const summary = historyMeta.summary ?? {};
   const liveBullish = liveRows.filter((item) => item.direction === "bullish").length;
   const liveBearish = liveRows.filter((item) => item.direction === "bearish").length;
+  const allTypes = (typePayload.all ?? []).map((item) => item.value);
+  const bullishTypes = (typePayload.bullish ?? []).map((item) => item.value);
+  const bearishTypes = (typePayload.bearish ?? []).map((item) => item.value);
+  const quickDirection = sameSelection(selectedTypes, allTypes)
+    ? "all"
+    : sameSelection(selectedTypes, bullishTypes)
+      ? "bullish"
+      : sameSelection(selectedTypes, bearishTypes)
+        ? "bearish"
+        : undefined;
 
   const columns = [
     {
@@ -186,9 +205,9 @@ export default function StockChangesPanel({ onSelectCode }) {
       key: "change",
       render: (_, record) => (
         <Space direction="vertical" size={4}>
-          <Space size={6} wrap>
-            <Tag color={directionColor(record.direction)}>{record.type_name}</Tag>
-            <Tag bordered={false}>{directionLabel(record.direction)}</Tag>
+          <Space size={8} wrap>
+            <Tag bordered={false} className="signal-type-chip">{record.type_name}</Tag>
+            <Badge color={directionDotColor(record.direction)} text={directionLabel(record.direction)} />
           </Space>
           <Text type="secondary">类型 {record.change_type}</Text>
         </Space>
@@ -234,7 +253,7 @@ export default function StockChangesPanel({ onSelectCode }) {
 
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
-      <Card bordered={false} className="stock-changes-hero">
+      <Card variant="borderless" className="stock-changes-hero">
         <div className="stock-changes-head">
           <div>
             <Text className="stock-changes-eyebrow">INTRADAY SIGNALS</Text>
@@ -245,16 +264,16 @@ export default function StockChangesPanel({ onSelectCode }) {
               实时抓取东方财富盘中异动，并写入本地历史表，后续用于预警、复盘和 AI 研究。
             </Text>
           </div>
-          <Space wrap>
-            <Tag color="red">上涨 {liveBullish}</Tag>
-            <Tag color="green">下跌 {liveBearish}</Tag>
-            <Tag>本次入库 {liveMeta.saved_count ?? 0}</Tag>
-            <Tag>{liveMeta.fetched_at ?? "--"}</Tag>
-          </Space>
+          <div className="stock-changes-metrics">
+            <Statistic title="上涨信号" value={liveBullish} prefix={<ArrowUpOutlined />} valueStyle={{ color: "#d70015" }} />
+            <Statistic title="下跌信号" value={liveBearish} prefix={<ArrowDownOutlined />} valueStyle={{ color: "#248a3d" }} />
+            <Statistic title="本次入库" value={liveMeta.saved_count ?? 0} prefix={<DatabaseOutlined />} />
+            <Text type="secondary" className="stock-changes-fetched-at">{liveMeta.fetched_at ?? "--"}</Text>
+          </div>
         </div>
       </Card>
 
-      <Card bordered={false} className="table-card" title="实时监控">
+      <Card variant="borderless" className="table-card stock-changes-live-card" title="实时监控">
         <Space direction="vertical" size={10} style={{ width: "100%" }}>
           <div className="stock-changes-toolbar">
             <Space wrap>
@@ -268,15 +287,20 @@ export default function StockChangesPanel({ onSelectCode }) {
                 placeholder="选择异动类型"
                 style={{ minWidth: 320 }}
               />
-              <Button onClick={() => setSelectedTypes((typePayload.all ?? []).map((item) => item.value))}>
-                全部
-              </Button>
-              <Button onClick={() => setSelectedTypes((typePayload.bullish ?? []).map((item) => item.value))}>
-                上涨型
-              </Button>
-              <Button onClick={() => setSelectedTypes((typePayload.bearish ?? []).map((item) => item.value))}>
-                下跌型
-              </Button>
+              <Segmented
+                size="small"
+                value={quickDirection}
+                options={[
+                  { value: "all", label: "全部" },
+                  { value: "bullish", label: "上涨型" },
+                  { value: "bearish", label: "下跌型" },
+                ]}
+                onChange={(value) => {
+                  if (value === "bullish") setSelectedTypes(bullishTypes);
+                  else if (value === "bearish") setSelectedTypes(bearishTypes);
+                  else setSelectedTypes(allTypes);
+                }}
+              />
             </Space>
             <Space wrap>
               <Text type="secondary">自动刷新</Text>
@@ -293,7 +317,13 @@ export default function StockChangesPanel({ onSelectCode }) {
             </Space>
           </div>
           {!selectedTypes.length ? (
-            <Alert showIcon type="warning" message="至少选择一个异动类型。" />
+            <Alert
+              showIcon
+              type="info"
+              className="compact-state-alert"
+              message="至少选择一个异动类型"
+              action={<Button size="small" type="link" onClick={() => setSelectedTypes(allTypes)}>恢复全部</Button>}
+            />
           ) : null}
           <Table
             rowKey={(record) => record.event_key ?? `${record.trade_date}-${record.event_time}-${record.stock_code}-${record.change_type}`}
@@ -309,14 +339,14 @@ export default function StockChangesPanel({ onSelectCode }) {
       </Card>
 
       <Card
-        bordered={false}
+        variant="borderless"
         className="table-card"
         title="异动历史"
         extra={
-          <Space wrap>
-            <Tag color="red">上涨 {summary.bullish ?? 0}</Tag>
-            <Tag color="green">下跌 {summary.bearish ?? 0}</Tag>
-            <Tag>总计 {historyMeta.total ?? 0}</Tag>
+          <Space wrap size={12} className="stock-changes-summary-badges">
+            <Badge color="#ff3b30" text={`上涨 ${summary.bullish ?? 0}`} />
+            <Badge color="#34c759" text={`下跌 ${summary.bearish ?? 0}`} />
+            <Badge color="#8e8e93" text={`总计 ${historyMeta.total ?? 0}`} />
           </Space>
         }
       >

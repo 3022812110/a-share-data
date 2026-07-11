@@ -28,7 +28,7 @@ export default function AiModelSettingsModal({
       onOk={onSave}
       okText="保存配置"
       cancelText="取消"
-      destroyOnClose
+      destroyOnHidden
     >
       <div className="model-settings-grid">
         <div>

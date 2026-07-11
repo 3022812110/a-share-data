@@ -4,7 +4,8 @@ import json
 import sqlite3
 
 from .db import get_connection
-from .market_feeds import load_market_insights, load_stock_event_feeds
+from .market_feeds import fetch_fund_ranking, load_market_insights, load_stock_event_feeds
+from .data_health import load_data_health
 from .research import build_stock_research_card
 
 
@@ -191,8 +192,26 @@ def load_market_overview() -> dict[str, object]:
     result["major_indices"] = _dicts(index_rows)
     result["exchange_overview"] = json.loads(overview_cache["payload_json"]) if overview_cache else {}
     result["exchange_overview_fetched_at"] = overview_cache["fetched_at"] if overview_cache else None
+    result["data_health"] = load_data_health()
     result["market_insights"] = load_market_insights()
     return result
+
+
+def load_fund_ranking(*, period: str = "1d", limit: int = 200) -> dict[str, object]:
+    payload = fetch_fund_ranking(period=period, limit=limit)
+    items = payload.get("items") or []
+    with get_connection() as connection:
+        watchlist_rows = connection.execute(
+            "SELECT stock_code FROM watchlist WHERE is_active = 1"
+        ).fetchall()
+    watchlist_codes = {str(row["stock_code"]) for row in watchlist_rows}
+    return {
+        **payload,
+        "items": [
+            {**item, "in_watchlist": str(item.get("stock_code")) in watchlist_codes}
+            for item in items
+        ],
+    }
 
 
 def load_market_page(

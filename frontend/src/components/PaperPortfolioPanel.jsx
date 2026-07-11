@@ -1,6 +1,8 @@
-import { Alert, Button, Card, Space, Table, Tag, Typography } from "antd";
+import { Badge, Button, Card, Space, Table, Tag, Typography } from "antd";
 
 import PaperSummaryCards from "./PaperSummaryCards";
+import CompactEmpty from "./CompactEmpty";
+import MarketStatusNotice from "./MarketStatusNotice";
 import { capText, colorStyle, numberText, percentText } from "../lib/formatters";
 
 const { Text } = Typography;
@@ -81,9 +83,9 @@ export default function PaperPortfolioPanel({
               {item}
             </Text>
           ))}
-          <Space size={4} wrap>
-            <Tag color={record.confidence === "高" ? "red" : "blue"}>置信 {record.confidence}</Tag>
-            <Tag color={record.risk_level === "高" ? "orange" : "green"}>风险 {record.risk_level}</Tag>
+          <Space size={10} wrap className="signal-badge-row">
+            <Badge color={record.confidence === "高" ? "#007aff" : "#8e8e93"} text={`置信 ${record.confidence}`} />
+            <Badge color={record.risk_level === "高" ? "#ff9f0a" : "#8e8e93"} text={`风险 ${record.risk_level}`} />
           </Space>
         </Space>
       ),
@@ -207,11 +209,12 @@ export default function PaperPortfolioPanel({
       render: (_, record) => (
         <Space direction="vertical" size={4}>
           {record.review_rating ? (
-            <Tag color={record.review_rating === "good" ? "green" : record.review_rating === "bad" ? "red" : "blue"}>
-              {record.review_rating === "good" ? "做得好" : record.review_rating === "bad" ? "做得差" : "一般"}
-            </Tag>
+            <Badge
+              color={record.review_rating === "good" ? "#34c759" : record.review_rating === "bad" ? "#ff3b30" : "#8e8e93"}
+              text={record.review_rating === "good" ? "做得好" : record.review_rating === "bad" ? "做得差" : "一般"}
+            />
           ) : (
-            <Tag>{record.plan_status === "closed" ? "待复盘" : "未结束"}</Tag>
+            <Badge status="default" text={record.plan_status === "closed" ? "待复盘" : "未结束"} />
           )}
           {record.plan_id && record.plan_status === "closed" ? (
             <Button
@@ -232,19 +235,10 @@ export default function PaperPortfolioPanel({
 
   return (
     <Space direction="vertical" size={10} style={{ width: "100%" }}>
-      <Alert
-        showIcon
-        type={marketOpen ? "success" : "warning"}
-        message={marketOpen ? "A股交易中，模拟盘可买卖" : marketStatus.reason ?? "正在确认 A 股交易状态"}
-        description={
-          marketStatus.next_open
-            ? `北京时间 ${marketStatus.current_time ?? "--"}，下次开市 ${marketStatus.next_open}`
-            : `北京时间 ${marketStatus.current_time ?? "--"}`
-        }
-      />
+      <MarketStatusNotice marketStatus={marketStatus} />
       <PaperSummaryCards portfolio={portfolio} />
       <Card
-        bordered={false}
+        variant="borderless"
         className="table-card trade-recommendation-card"
         title="训练推荐"
         loading={recommendationLoading}
@@ -256,9 +250,10 @@ export default function PaperPortfolioPanel({
       >
         <div className="trade-recommendation-summary">
           <Space wrap>
-            <Tag color={marketContext.regime === "偏强" ? "red" : marketContext.regime === "偏弱" ? "green" : "blue"}>
-              {marketContext.regime ?? "观察"}
-            </Tag>
+            <Badge
+              color={marketContext.regime === "偏强" ? "#ff3b30" : marketContext.regime === "偏弱" ? "#34c759" : "#8e8e93"}
+              text={marketContext.regime ?? "观察"}
+            />
             <Text type="secondary">上涨占比 {numberText(marketContext.rising_ratio)}%</Text>
             <Text type="secondary">涨停 {marketContext.limit_up_count ?? 0}</Text>
             <Text type="secondary">跌停 {marketContext.limit_down_count ?? 0}</Text>
@@ -272,29 +267,29 @@ export default function PaperPortfolioPanel({
           columns={recommendationColumns}
           dataSource={recommendations}
           pagination={false}
-          locale={{ emptyText: "当前没有满足仓位和风险条件的训练标的。" }}
+          locale={{ emptyText: <CompactEmpty description="当前没有满足仓位和风险条件的训练标的" /> }}
           onRow={(record) => ({ onClick: () => onSelectCode(record.stock_code) })}
         />
       </Card>
-      <Card bordered={false} className="table-card" title="当前持仓" loading={loading}>
+      <Card variant="borderless" className="table-card" title="当前持仓" loading={loading}>
         <Table
           rowKey="stock_code"
           size="small"
           columns={positionColumns}
           dataSource={positions}
           pagination={false}
-          locale={{ emptyText: "当前没有持仓，先从右侧详情里试一笔模拟买入。" }}
+          locale={{ emptyText: <CompactEmpty description="当前没有持仓，可从股票详情发起模拟买入" /> }}
           onRow={(record) => ({ onClick: () => onSelectCode(record.stock_code) })}
         />
       </Card>
-      <Card bordered={false} className="table-card" title="最近成交" loading={loading}>
+      <Card variant="borderless" className="table-card" title="最近成交" loading={loading}>
         <Table
           rowKey="id"
           size="small"
           columns={tradeColumns}
           dataSource={trades}
           pagination={{ pageSize: 8, hideOnSinglePage: true }}
-          locale={{ emptyText: "还没有交易记录。" }}
+          locale={{ emptyText: <CompactEmpty description="还没有交易记录" /> }}
           onRow={(record) => ({ onClick: () => onSelectCode(record.stock_code) })}
         />
       </Card>

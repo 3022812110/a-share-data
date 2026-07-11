@@ -5,6 +5,7 @@ import math
 from typing import Iterable
 
 import baostock as bs
+import akshare as ak
 import requests
 
 from .akshare_client import (
@@ -162,6 +163,47 @@ def _load_catalog_from_db() -> list[dict[str, str]]:
     ]
 
 
+def _catalog_is_recent(*, max_age_hours: int = 12) -> bool:
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).replace(microsecond=0).isoformat() + "Z"
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END) AS fresh
+            FROM stock_catalog
+            WHERE market IN ('SH', 'SZ', 'BJ')
+            """,
+            (cutoff,),
+        ).fetchone()
+    total = int(row["total"] or 0) if row else 0
+    fresh = int(row["fresh"] or 0) if row else 0
+    return total >= 5000 and fresh / total >= 0.98
+
+
+def _query_akshare_stock_rows() -> list[dict[str, str]]:
+    frame = ak.stock_info_a_code_name()
+    if frame is None or frame.empty:
+        return []
+    updated_at = _utc_now_str()
+    rows: list[dict[str, str]] = []
+    for record in frame.to_dict(orient="records"):
+        stock_code = normalize_stock_code(str(record.get("code") or "").zfill(6))
+        market = _market_from_code(stock_code)
+        if not _is_a_share_code(stock_code, market):
+            continue
+        rows.append(
+            {
+                "stock_code": stock_code,
+                "stock_name": str(record.get("name") or stock_code).strip(),
+                "market": market,
+                "source": "akshare",
+                "updated_at": updated_at,
+            }
+        )
+    return rows
+
+
 def _resolve_full_market_catalog(trade_date: str | None = None) -> tuple[list[dict[str, str]], str | None]:
     if trade_date:
         try:
@@ -194,9 +236,19 @@ def _resolve_full_market_catalog(trade_date: str | None = None) -> tuple[list[di
             if rows:
                 return rows, candidate
 
-    rows = _load_catalog_from_db()
+    cached_rows = _load_catalog_from_db()
+    if cached_rows and _catalog_is_recent():
+        return cached_rows, "stock_catalog"
+
+    try:
+        rows = _query_akshare_stock_rows()
+    except Exception:
+        rows = []
     if rows:
-        return rows, "stock_catalog"
+        return rows, "akshare_catalog"
+
+    if cached_rows:
+        return cached_rows, "stock_catalog"
 
     return [], None
 
@@ -396,6 +448,10 @@ def sync_stock_market_snapshot(
         with get_connection() as connection:
             connection.execute(
                 f"DELETE FROM stock_market_snapshot WHERE stock_code NOT IN ({placeholders})",
+                valid_codes,
+            )
+            connection.execute(
+                f"DELETE FROM stock_catalog WHERE stock_code NOT IN ({placeholders})",
                 valid_codes,
             )
     snapshot_rows = fetch_market_snapshot(catalog_rows)

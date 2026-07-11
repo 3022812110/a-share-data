@@ -44,6 +44,66 @@ function sma(items, period) {
   return result;
 }
 
+function emaValues(values, period) {
+  if (!values.length) return [];
+  const multiplier = 2 / (period + 1);
+  const result = [values[0]];
+  for (let index = 1; index < values.length; index += 1) {
+    result.push(values[index] * multiplier + result[index - 1] * (1 - multiplier));
+  }
+  return result;
+}
+
+function calculateTechnicalSignals(items) {
+  const closes = items.map((item) => Number(item.close)).filter(Number.isFinite);
+  if (closes.length < 26) return null;
+
+  const ema12 = emaValues(closes, 12);
+  const ema26 = emaValues(closes, 26);
+  const macdSeries = closes.map((_, index) => ema12[index] - ema26[index]);
+  const signalSeries = emaValues(macdSeries, 9);
+  const macd = macdSeries.at(-1);
+  const signal = signalSeries.at(-1);
+  const histogram = (macd - signal) * 2;
+
+  let gains = 0;
+  let losses = 0;
+  const rsiWindow = closes.slice(-15);
+  for (let index = 1; index < rsiWindow.length; index += 1) {
+    const change = rsiWindow[index] - rsiWindow[index - 1];
+    if (change >= 0) gains += change;
+    else losses += Math.abs(change);
+  }
+  const averageGain = gains / 14;
+  const averageLoss = losses / 14;
+  const rsi = averageLoss === 0 ? 100 : 100 - 100 / (1 + averageGain / averageLoss);
+
+  const bollWindow = closes.slice(-20);
+  const middle = bollWindow.reduce((sum, value) => sum + value, 0) / bollWindow.length;
+  const variance = bollWindow.reduce((sum, value) => sum + (value - middle) ** 2, 0) / bollWindow.length;
+  const deviation = Math.sqrt(variance);
+  const upper = middle + deviation * 2;
+  const lower = middle - deviation * 2;
+  const latestClose = closes.at(-1);
+
+  const positiveSignals = [macd > signal, latestClose > middle, rsi >= 45 && rsi <= 70].filter(Boolean).length;
+  const verdict = positiveSignals >= 3 ? "偏强" : positiveSignals <= 1 ? "偏弱" : "震荡";
+  const tone = verdict === "偏强" ? "red" : verdict === "偏弱" ? "green" : "gold";
+
+  return {
+    rsi,
+    macd,
+    signal,
+    histogram,
+    middle,
+    upper,
+    lower,
+    latestClose,
+    verdict,
+    tone,
+  };
+}
+
 function buildPriceLines(series, snapshot) {
   if (!series || !snapshot) return [];
   const configs = [
@@ -215,6 +275,10 @@ export default function StockKLinePanel({ stockCode, snapshot }) {
   }, [interval, payload, snapshot]);
 
   const latest = payload?.latest;
+  const technicalSignals = React.useMemo(
+    () => calculateTechnicalSignals(payload?.items ?? []),
+    [payload]
+  );
   const activeInterval = INTERVAL_OPTIONS.find((item) => item.value === interval)?.label ?? "日K";
   const levelItems = [
     { label: "买入位", value: snapshot?.buy_price, tone: "buy" },
@@ -299,9 +363,9 @@ export default function StockKLinePanel({ stockCode, snapshot }) {
             <div className="kline-side-section">
               <div className="kline-side-head">
                 <Text strong>快速信号</Text>
-                <Tag color={Number(snapshot?.change_pct) >= 0 ? "red" : "green"}>
+                <Text strong style={colorStyle(snapshot?.change_pct)}>
                   {percentText(snapshot?.change_pct)}
-                </Tag>
+                </Text>
               </div>
               <div className="kline-side-grid">
                 {quickSignalItems.map((item) => (
@@ -336,30 +400,54 @@ export default function StockKLinePanel({ stockCode, snapshot }) {
 
             <div className="kline-side-section">
               <div className="kline-side-head">
-                <Text strong>最新K线摘要</Text>
-                <Text type="secondary">{activeInterval}</Text>
+                <Text strong>技术指标雷达</Text>
+                {technicalSignals ? <Tag color={technicalSignals.tone}>{technicalSignals.verdict}</Tag> : null}
               </div>
-              {latest ? (
-                <div className="kline-summary-list">
+              {technicalSignals ? (
+                <div className="technical-signal-list">
                   <div className="kline-summary-row">
-                    <span>成交量</span>
-                    <strong>{numberText(latest.volume, 0)}</strong>
+                    <span>RSI 14</span>
+                    <strong style={colorStyle(technicalSignals.rsi > 70 ? -1 : technicalSignals.rsi < 30 ? 1 : 0)}>
+                      {numberText(technicalSignals.rsi, 1)}
+                    </strong>
                   </div>
                   <div className="kline-summary-row">
-                    <span>成交额</span>
-                    <strong>{numberText(latest.amount, 0)}</strong>
+                    <span>MACD</span>
+                    <strong style={colorStyle(technicalSignals.histogram)}>
+                      {numberText(technicalSignals.macd, 3)}
+                    </strong>
                   </div>
                   <div className="kline-summary-row">
-                    <span>振幅</span>
-                    <strong>{percentText(latest.amplitude_pct)}</strong>
+                    <span>信号线</span>
+                    <strong>{numberText(technicalSignals.signal, 3)}</strong>
                   </div>
                   <div className="kline-summary-row">
-                    <span>涨跌额</span>
-                    <strong style={colorStyle(latest.change_amount)}>{numberText(latest.change_amount, 2)}</strong>
+                    <span>BOLL 中轨</span>
+                    <strong>{numberText(technicalSignals.middle, 2)}</strong>
+                  </div>
+                  <div className="technical-boll-band">
+                    <Text type="secondary">下 {numberText(technicalSignals.lower, 2)}</Text>
+                    <span className="technical-boll-track">
+                      <span
+                        className="technical-boll-marker"
+                        style={{
+                          left: `${Math.max(
+                            0,
+                            Math.min(
+                              100,
+                              ((technicalSignals.latestClose - technicalSignals.lower) /
+                                Math.max(technicalSignals.upper - technicalSignals.lower, 0.01)) *
+                                100
+                            )
+                          )}%`,
+                        }}
+                      />
+                    </span>
+                    <Text type="secondary">上 {numberText(technicalSignals.upper, 2)}</Text>
                   </div>
                 </div>
               ) : (
-                <div className="kline-empty-note">暂无摘要数据。</div>
+                <div className="kline-empty-note">至少需要 26 根 K 线才能计算指标。</div>
               )}
             </div>
           </aside>

@@ -770,7 +770,7 @@ export default function DetailPanel({
   };
 
   return (
-    <Card bordered={false} className="detail-card" loading={loading}>
+    <Card variant="borderless" className="detail-card" loading={loading}>
       {!snapshot ? (
         <div className="detail-placeholder">选择一只股票查看详情</div>
       ) : (

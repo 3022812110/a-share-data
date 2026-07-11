@@ -5,9 +5,10 @@
 ## 当前能力
 
 - 全市场股票快照与市场总览
+- 数据健康检查、过期提示与后台自动补刷
 - 我的自选与自定义交易股数
 - AI 条件选股
-- 单股研究卡与基础回测
+- 多周期 K 线、MA / RSI / MACD / BOLL 指标、单股研究卡与基础回测
 - 模拟交易账户、持仓、成交记录
 - 交易计划与卖后复盘
 
@@ -25,6 +26,7 @@ src/ashare_data/     核心后端逻辑
 scripts/             启动与数据同步脚本
 frontend/            React 前端
 data/                本地 SQLite 数据库（不提交）
+shared-state/        可提交的个人数据安全快照
 web_app.py           早期 Streamlit 入口
 ```
 
@@ -56,6 +58,8 @@ PYTHONPATH=src python scripts/run_api.py
 ```
 默认监听：`http://127.0.0.1:8001`
 
+API 启动后会每 3 分钟检查核心行情新鲜度；只有发现全市场快照或主要指数过期时才会自动补刷。可通过 `DISABLE_MARKET_AUTO_REFRESH=1` 关闭。
+
 ### 4. 启动前端
 
 ```bash
@@ -69,5 +73,6 @@ npm run dev
 ## 说明
 
 - `data/market.db` 是本地研究数据库，不应直接提交到仓库。
+- `shared-state/market.snapshot` 是通过 SQLite 备份生成的个人数据快照，可随代码提交到私有仓库并在另一台电脑恢复；不要直接提交运行中的 `data/market.db`。
 - `.env.local` 仅用于本机保存私密 token，不应提交到仓库。
 - 现阶段系统定位是“研究与模拟训练”，不是自动交易系统。

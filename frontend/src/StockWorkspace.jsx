@@ -4,7 +4,9 @@ import {
   BarChartOutlined,
   BankOutlined,
   FundProjectionScreenOutlined,
+  LineChartOutlined,
   ReloadOutlined,
+  RiseOutlined,
   StarOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
@@ -19,6 +21,8 @@ import StockTable from "./components/StockTable";
 import ScreeningChatPanel from "./components/ScreeningChatPanel";
 import AnalysisSidebar from "./components/AnalysisSidebar";
 import StockChangesPanel from "./components/StockChangesPanel";
+import DataHealthBar from "./components/DataHealthBar";
+import FundRankingPanel from "./components/FundRankingPanel";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -36,6 +40,7 @@ const sortOptions = [
 
 const menuItems = [
   { key: "all", icon: <FundProjectionScreenOutlined />, label: "所有股票" },
+  { key: "funds", icon: <RiseOutlined />, label: "资金榜" },
   { key: "watch", icon: <StarOutlined />, label: "我的自选" },
   { key: "changes", icon: <ThunderboltOutlined />, label: "盘中异动" },
   ...(ENABLE_AI_ANALYSIS
@@ -113,7 +118,7 @@ export default function StockWorkspace() {
   }, []);
 
   const loadList = React.useCallback(async () => {
-    if (activeMenu === "analysis" || activeMenu === "paper" || activeMenu === "changes") return;
+    if (activeMenu === "analysis" || activeMenu === "paper" || activeMenu === "changes" || activeMenu === "funds") return;
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -665,7 +670,7 @@ export default function StockWorkspace() {
   };
 
   const renderToolbar = () => (
-    <Space wrap>
+    <Space wrap={false} size={6}>
       <Input.Search
         allowClear
         placeholder="搜索代码或名称"
@@ -673,9 +678,9 @@ export default function StockWorkspace() {
           setPage(1);
           setSearch(value);
         }}
-        style={{ width: 220 }}
+        style={{ width: 190 }}
       />
-      <Select value={sortBy} options={sortOptions} onChange={setSortBy} style={{ width: 140 }} />
+      <Select value={sortBy} options={sortOptions} onChange={setSortBy} style={{ width: 112 }} />
       <Select
         value={sortOrder}
         options={[
@@ -683,7 +688,7 @@ export default function StockWorkspace() {
           { value: "asc", label: "升序" },
         ]}
         onChange={setSortOrder}
-        style={{ width: 110 }}
+        style={{ width: 82 }}
       />
       {activeMenu === "all" ? (
         <Space>
@@ -703,6 +708,8 @@ export default function StockWorkspace() {
   const pageTitle =
     activeMenu === "watch"
       ? "我的自选"
+      : activeMenu === "funds"
+        ? "资金榜"
       : activeMenu === "changes"
         ? "盘中异动"
       : activeMenu === "analysis"
@@ -713,6 +720,8 @@ export default function StockWorkspace() {
   const pageSubtitle =
     activeMenu === "watch"
       ? "这里只显示你主动加入的自选股"
+      : activeMenu === "funds"
+        ? "1日、3日与13日趋势资金排行"
       : activeMenu === "changes"
         ? "实时异动信号与本地历史沉淀"
       : activeMenu === "analysis"
@@ -723,14 +732,14 @@ export default function StockWorkspace() {
 
   return (
     <Layout className="app-shell">
-      <Sider width={164} breakpoint="lg" collapsedWidth={0} className="app-sider">
+      <Sider width={148} breakpoint="lg" collapsedWidth={0} className="app-sider">
         <div className="brand-box">
-          <div className="brand-icon">股</div>
+          <div className="brand-icon"><LineChartOutlined /></div>
           <div>
             <Title level={5} style={{ margin: 0, color: "#0f172a" }}>
-              A-Share Data
+              研盘
             </Title>
-            <Text type="secondary">股票选股控制台</Text>
+            <Text type="secondary">A 股研究工作台</Text>
           </div>
         </div>
         <Menu
@@ -743,21 +752,21 @@ export default function StockWorkspace() {
       </Sider>
 
       <Layout>
-        <Header className="top-header">
+        <Header className="top-header apple-toolbar">
           <div className="page-heading-inline">
             <Title level={4} style={{ margin: 0 }}>
               {pageTitle}
             </Title>
             {pageSubtitle ? <Text type="secondary">{pageSubtitle}</Text> : null}
           </div>
-          <Space>
-            <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing}>
-              同步全市场
+          {activeMenu !== "all" ? (
+            <Button size="small" icon={<ReloadOutlined />} onClick={handleRefresh} loading={refreshing}>
+              同步行情
             </Button>
-          </Space>
+          ) : null}
         </Header>
 
-        <Content className="page-content">
+        <Content className={`page-content page-content-${activeMenu}${detailPageOpen ? " page-content-detail" : ""}`}>
           {detailPageOpen ? (
             <StockDetailPage
               activeMenu={activeMenu}
@@ -794,6 +803,7 @@ export default function StockWorkspace() {
             <>
               {activeMenu === "all" ? (
                 <>
+                  <DataHealthBar health={summary.data_health} refreshing={refreshing} onRefresh={handleRefresh} />
                   <MarketOverviewPanel summary={summary} onSelectCode={handleOpenDetail} />
                 </>
               ) : null}
@@ -815,6 +825,9 @@ export default function StockWorkspace() {
               {activeMenu === "changes" ? (
                 <StockChangesPanel onSelectCode={handleOpenDetail} />
               ) : null}
+              {activeMenu === "funds" ? (
+                <FundRankingPanel onSelectCode={handleOpenDetail} onToggleWatchlist={handleToggleWatchlist} />
+              ) : null}
               {activeMenu === "paper" ? (
                 <PaperPortfolioPanel
                   portfolio={paperPortfolio}
@@ -827,7 +840,7 @@ export default function StockWorkspace() {
                   onQuickTrade={handleQuickTrade}
                   onRefreshRecommendations={loadTradeRecommendations}
                 />
-              ) : activeMenu === "analysis" || activeMenu === "changes" ? null : (
+              ) : activeMenu === "analysis" || activeMenu === "changes" || activeMenu === "funds" ? null : (
                 <StockTable
                   title={pageTitle}
                   items={items}
@@ -860,7 +873,7 @@ export default function StockWorkspace() {
         width={440}
         open={analysisPanelOpen}
         onClose={() => setAnalysisPanelOpen(false)}
-        destroyOnClose={false}
+        destroyOnHidden={false}
       >
         <AnalysisSidebar
           screeningPreset={screeningPreset}
@@ -893,7 +906,7 @@ export default function StockWorkspace() {
         okText="保存复盘"
         cancelText="取消"
         confirmLoading={reviewSaving}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={reviewForm} layout="vertical">
           <Form.Item label="卖出原因" name="exit_reason">

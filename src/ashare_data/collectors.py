@@ -9,6 +9,7 @@ import pandas as pd
 from .akshare_client import fetch_akshare_daily_bars
 from .baostock_client import fetch_baostock_daily_bars
 from .tushare_client import fetch_tushare_daily_bars
+from .eastmoney_kline import fetch_stock_kline
 
 
 def _utc_now_str() -> str:
@@ -40,6 +41,71 @@ def fetch_daily_bars(
                 end_date=end_date,
                 adjust_type=adjust_type,
             )
+        except Exception:
+            frame = pd.DataFrame()
+        if not frame.empty:
+            frame["adjust_type"] = adjust_type
+            frame["k_type"] = k_type
+            frame["fetched_at"] = _utc_now_str()
+            ordered_columns = [
+                "stock_code",
+                "trade_time",
+                "trade_date",
+                "open",
+                "close",
+                "high",
+                "low",
+                "volume",
+                "amount",
+                "change_pct",
+                "change",
+                "turnover_ratio",
+                "pre_close",
+                "source",
+                "adjust_type",
+                "k_type",
+                "fetched_at",
+            ]
+            return frame[ordered_columns]
+
+        try:
+            payload = fetch_stock_kline(
+                stock_code,
+                interval="day",
+                adjust="qfq" if adjust_type == 1 else "none",
+                limit=1000,
+            )
+            eastmoney_rows = []
+            for item in payload.get("items", []):
+                trade_date = str(item.get("time") or "")[:10]
+                if not trade_date or trade_date < start_date:
+                    continue
+                if end_date and trade_date > end_date:
+                    continue
+                close = item.get("close")
+                change_pct = item.get("change_pct")
+                pre_close = None
+                if close is not None and change_pct is not None and float(change_pct) != -100:
+                    pre_close = float(close) / (1 + float(change_pct) / 100)
+                eastmoney_rows.append(
+                    {
+                        "stock_code": stock_code,
+                        "trade_time": trade_date,
+                        "trade_date": trade_date,
+                        "open": item.get("open"),
+                        "close": close,
+                        "high": item.get("high"),
+                        "low": item.get("low"),
+                        "volume": item.get("volume"),
+                        "amount": item.get("amount"),
+                        "change_pct": change_pct,
+                        "change": item.get("change_amount"),
+                        "turnover_ratio": item.get("turnover_ratio"),
+                        "pre_close": pre_close,
+                        "source": "eastmoney",
+                    }
+                )
+            frame = pd.DataFrame(eastmoney_rows)
         except Exception:
             frame = pd.DataFrame()
         if not frame.empty:

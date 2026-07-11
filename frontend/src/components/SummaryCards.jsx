@@ -15,7 +15,7 @@ export default function SummaryCards({ summary }) {
   return (
     <div className="stat-grid compact-strip">
       {metrics.map((item) => (
-        <Card bordered={false} key={item.label} className="compact-metric-card">
+        <Card variant="borderless" key={item.label} className="compact-metric-card">
           <div className="compact-metric-row">
             <Text type="secondary">{item.label}</Text>
             <Text strong style={item.style}>
