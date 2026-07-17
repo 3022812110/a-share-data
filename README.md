@@ -27,15 +27,20 @@ scripts/             启动与数据同步脚本
 frontend/            React 前端
 data/                本地 SQLite 数据库（不提交）
 shared-state/        可提交的个人数据安全快照
+docs/ai/             AI 项目概览、当前状态、工作日志与交接模板
 web_app.py           早期 Streamlit 入口
 ```
+
+## AI 项目日志
+
+本仓库使用 `docs/ai/` 保存面向 AI 编程助手的项目知识和持续工作记录。新设备或新会话先阅读 [AI 项目日志](docs/ai/README.md)，可以快速了解架构、当前状态、已知风险和最近验证结果。仓库根目录的 `AGENTS.md` 规定了 AI 的协作与维护规则。
 
 ## 本地启动
 
 ### 1. 安装后端依赖
 
 ```bash
-cd /Users/zhangmi/Desktop/Work/a-share-data
+cd /path/to/a-share-data
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -52,7 +57,7 @@ TUSHARE_TOKEN=your_token_here
 ### 3. 启动 API
 
 ```bash
-cd /Users/zhangmi/Desktop/Work/a-share-data
+cd /path/to/a-share-data
 source .venv/bin/activate
 PYTHONPATH=src python scripts/run_api.py
 ```
@@ -63,7 +68,7 @@ API 启动后会每 3 分钟检查核心行情新鲜度；只有发现全市场�
 ### 4. 启动前端
 
 ```bash
-cd /Users/zhangmi/Desktop/Work/a-share-data/frontend
+cd /path/to/a-share-data/frontend
 npm install
 npm run dev
 ```

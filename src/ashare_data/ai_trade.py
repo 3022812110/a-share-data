@@ -4,9 +4,11 @@ import json
 from typing import Any
 
 from .api_queries import load_stock_detail
+from .data_health import expected_latest_trade_date
 from .db import get_connection, init_db
 from .market_feeds import load_market_insights
 from .paper_trading import DEFAULT_ACCOUNT_ID, execute_paper_order, get_paper_portfolio, upsert_trade_plan
+from .recommendation_performance import register_recommendation_items
 from .screening_ai import (
     API_KEY_REQUIRED_PROVIDERS,
     DEFAULT_BASE_URLS,
@@ -16,6 +18,7 @@ from .screening_ai import (
     _clamp_int,
     _parse_json_object,
 )
+from .trade_risk import RISK_POLICY_VERSION, build_market_risk_context, load_market_risk_context
 
 
 DEFAULT_TRADE_SYSTEM_PROMPT = (
@@ -41,15 +44,22 @@ def generate_ai_trade_decision(
 
     portfolio = get_paper_portfolio(account_id=account_id)
     recent_decisions = list_ai_trade_decisions(account_id=account_id, stock_code=stock_code, limit=6)
+    with get_connection() as connection:
+        market_context = load_market_risk_context(
+            connection,
+            expected_trade_date=expected_latest_trade_date().isoformat(),
+        )
+    input_prompt = _build_trade_user_prompt(
+        snapshot=snapshot,
+        detail=detail,
+        portfolio=portfolio,
+        recent_decisions=recent_decisions,
+        market_context=market_context,
+    )
     messages = [
         {
             "role": "user",
-            "content": _build_trade_user_prompt(
-                snapshot=snapshot,
-                detail=detail,
-                portfolio=portfolio,
-                recent_decisions=recent_decisions,
-            ),
+            "content": input_prompt,
         }
     ]
     response_text = _call_provider(
@@ -63,12 +73,24 @@ def generate_ai_trade_decision(
         max_tokens=prepared["max_tokens"],
     )
     decision = _parse_trade_decision(response_text, snapshot=snapshot, portfolio=portfolio)
+    if decision["action"] == "buy" and not market_context["trade_gate"]["allow_new_positions"]:
+        reasons = market_context["trade_gate"].get("reasons") or ["市场风险门槛已触发"]
+        decision["action"] = "watch"
+        decision["quantity"] = 0
+        decision["position_size_pct"] = 0
+        decision["summary"] = f"暂停买入：{reasons[0]}。"
+        decision["reasoning"] = [*reasons, *decision.get("reasoning", [])][:5]
     return _insert_trade_decision(
         account_id=account_id,
         provider=prepared["provider"],
         model=prepared["model"],
         raw_response=response_text,
         decision=decision,
+        context_snapshot={
+            "policy_version": RISK_POLICY_VERSION,
+            "market_context": market_context,
+            "input_prompt": input_prompt,
+        },
     )
 
 
@@ -122,22 +144,12 @@ def generate_trade_recommendations(
     total_assets = float(account.get("total_assets") or cash_balance or 0)
     target_limit = max(1, min(int(limit or 6), 12))
 
+    expected_trade_date = expected_latest_trade_date().isoformat()
     with get_connection() as connection:
-        market_row = connection.execute(
-            """
-            SELECT
-                COUNT(*) AS stock_count,
-                SUM(CASE WHEN change_pct > 0 THEN 1 ELSE 0 END) AS rising_count,
-                SUM(CASE WHEN change_pct < 0 THEN 1 ELSE 0 END) AS falling_count,
-                SUM(CASE WHEN change_pct >= 9.8 THEN 1 ELSE 0 END) AS limit_up_count,
-                SUM(CASE WHEN change_pct <= -9.8 THEN 1 ELSE 0 END) AS limit_down_count,
-                ROUND(SUM(COALESCE(amount, 0)) / 10000, 2) AS turnover_yi,
-                MAX(trade_time) AS latest_trade_time,
-                MAX(fetched_at) AS latest_fetch
-            FROM stock_market_snapshot
-            WHERE market IN ('SH', 'SZ')
-            """
-        ).fetchone()
+        market_context = load_market_risk_context(
+            connection,
+            expected_trade_date=expected_trade_date,
+        )
         candidate_rows = connection.execute(
             """
             SELECT
@@ -152,6 +164,7 @@ def generate_trade_recommendations(
                 s.pb_ratio,
                 s.amount,
                 s.total_market_value,
+                s.source,
                 s.trade_time,
                 s.fetched_at
             FROM stock_market_snapshot s
@@ -178,9 +191,8 @@ def generate_trade_recommendations(
             LIMIT 180
             """,
             (account_id,),
-        ).fetchall()
+        ).fetchall() if market_context["trade_gate"]["allow_new_positions"] else []
 
-    market_context = _build_recommendation_market_context(market_row)
     try:
         insights = load_market_insights(max_age_seconds=900)
     except Exception:
@@ -204,8 +216,11 @@ def generate_trade_recommendations(
 
     scored_candidates.sort(key=lambda item: (item["score"], item.get("amount") or 0), reverse=True)
 
-    target_deploy_cash = max(0.0, min(cash_balance * 0.7, total_assets * 0.7))
-    per_position_cap = max(0.0, min(cash_balance * 0.3, total_assets * 0.25))
+    trade_gate = market_context["trade_gate"]
+    current_market_value = float(account.get("market_value") or 0)
+    max_total_market_value = total_assets * float(trade_gate["max_total_position_pct"]) / 100
+    target_deploy_cash = max(0.0, min(cash_balance, max_total_market_value - current_market_value))
+    per_position_cap = max(0.0, total_assets * float(trade_gate["max_single_position_pct"]) / 100)
     planned_cash = 0.0
     recommendations: list[dict[str, Any]] = []
 
@@ -222,7 +237,7 @@ def generate_trade_recommendations(
         lot_cash = price * 100
         if lot_cash > cash_balance - planned_cash:
             continue
-        if lot_cash > total_assets * 0.35:
+        if lot_cash > per_position_cap:
             continue
 
         quantity_budget = min(per_position_cap, remaining_budget)
@@ -242,13 +257,31 @@ def generate_trade_recommendations(
         recommendations.append(recommendation)
         planned_cash += float(recommendation["estimated_cash"])
 
+    generated_at = _utc_now_str()
+    account_snapshot = {
+        "cash_balance": round(cash_balance, 2),
+        "total_assets": round(total_assets, 2),
+        "current_market_value": round(current_market_value, 2),
+        "current_position_pct": round((current_market_value / total_assets) * 100, 2) if total_assets else 0,
+        "target_deploy_cash": round(target_deploy_cash, 2),
+        "planned_cash": round(planned_cash, 2),
+        "planned_position_pct": round((planned_cash / total_assets) * 100, 2) if total_assets else 0,
+    }
+    run_id = _insert_recommendation_run(
+        account_id=account_id,
+        account_snapshot=account_snapshot,
+        market_context=market_context,
+        topic_context=topic_context,
+        recommendations=recommendations,
+        generated_at=generated_at,
+    )
+
     return {
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "policy_version": RISK_POLICY_VERSION,
         "account": {
-            "cash_balance": round(cash_balance, 2),
-            "total_assets": round(total_assets, 2),
-            "target_deploy_cash": round(target_deploy_cash, 2),
-            "planned_cash": round(planned_cash, 2),
-            "planned_position_pct": round((planned_cash / total_assets) * 100, 2) if total_assets else 0,
+            **account_snapshot,
         },
         "market_context": market_context,
         "topic_context": topic_context,
@@ -263,38 +296,7 @@ def generate_trade_recommendations(
 
 
 def _build_recommendation_market_context(row) -> dict[str, Any]:
-    market = dict(row) if row else {}
-    stock_count = int(market.get("stock_count") or 0)
-    rising_count = int(market.get("rising_count") or 0)
-    falling_count = int(market.get("falling_count") or 0)
-    limit_up_count = int(market.get("limit_up_count") or 0)
-    limit_down_count = int(market.get("limit_down_count") or 0)
-    rising_ratio = round((rising_count / stock_count) * 100, 2) if stock_count else 0
-    turnover_yi = float(market.get("turnover_yi") or 0)
-
-    if rising_ratio >= 65 and limit_up_count >= max(30, limit_down_count * 8):
-        regime = "偏强"
-        strategy = "可做小仓顺势，但避免追高潮。"
-    elif rising_ratio <= 40 or limit_down_count > limit_up_count:
-        regime = "偏弱"
-        strategy = "以观察为主，只允许极小仓试错。"
-    else:
-        regime = "震荡"
-        strategy = "只做强主线低吸，减少后排交易。"
-
-    return {
-        "stock_count": stock_count,
-        "rising_count": rising_count,
-        "falling_count": falling_count,
-        "rising_ratio": rising_ratio,
-        "limit_up_count": limit_up_count,
-        "limit_down_count": limit_down_count,
-        "turnover_yi": round(turnover_yi, 2),
-        "latest_trade_time": market.get("latest_trade_time"),
-        "latest_fetch": market.get("latest_fetch"),
-        "regime": regime,
-        "strategy": strategy,
-    }
+    return build_market_risk_context(row)
 
 
 def _build_recommendation_topic_context(insights: dict[str, Any]) -> dict[str, Any]:
@@ -490,7 +492,55 @@ def _build_recommendation_item(
             "hot_words": topic_context.get("hot_words", [])[:6],
             "hot_topics": topic_context.get("hot_topics", [])[:3],
         },
+        "evidence": {
+            "source": candidate.get("source"),
+            "trade_time": candidate.get("trade_time"),
+            "fetched_at": candidate.get("fetched_at"),
+            "policy_version": RISK_POLICY_VERSION,
+        },
     }
+
+
+def _insert_recommendation_run(
+    *,
+    account_id: str,
+    account_snapshot: dict[str, Any],
+    market_context: dict[str, Any],
+    topic_context: dict[str, Any],
+    recommendations: list[dict[str, Any]],
+    generated_at: str,
+) -> int:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ai_recommendation_runs (
+                account_id, policy_version, account_snapshot_json,
+                market_context_json, topic_context_json, recommendations_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                RISK_POLICY_VERSION,
+                json.dumps(account_snapshot, ensure_ascii=False),
+                json.dumps(market_context, ensure_ascii=False),
+                json.dumps(topic_context, ensure_ascii=False),
+                json.dumps(recommendations, ensure_ascii=False),
+                generated_at,
+            ),
+        )
+        run_id = int(cursor.lastrowid)
+        register_recommendation_items(
+            connection,
+            run_id=run_id,
+            account_id=account_id,
+            policy_version=RISK_POLICY_VERSION,
+            market_context=market_context,
+            recommendations=recommendations,
+            created_at=generated_at,
+        )
+    return run_id
 
 
 def apply_ai_trade_decision(
@@ -686,6 +736,7 @@ def _build_trade_user_prompt(
     detail: dict[str, Any],
     portfolio: dict[str, Any],
     recent_decisions: list[dict[str, Any]],
+    market_context: dict[str, Any],
 ) -> str:
     research = detail.get("research") or {}
     feeds = detail.get("feeds") or {}
@@ -790,6 +841,7 @@ def _build_trade_user_prompt(
             "current_position": position,
             "recent_trades": recent_trades,
         },
+        "market_risk_context": market_context,
         "recent_ai_decisions": recent_decisions[:6],
     }
     return "\n\n".join(
@@ -930,6 +982,7 @@ def _insert_trade_decision(
     model: str,
     raw_response: str,
     decision: dict[str, Any],
+    context_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     now = _utc_now_str()
     with get_connection() as connection:
@@ -940,9 +993,10 @@ def _insert_trade_decision(
                 planned_holding_days, buy_price, stop_loss_price, take_profit_price,
                 invalidation_condition, plan_note, quantity, position_size_pct,
                 confidence, risk_level, reasoning_json, provider, model, raw_response,
+                context_snapshot_json,
                 status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?)
             """,
             (
                 account_id,
@@ -965,6 +1019,7 @@ def _insert_trade_decision(
                 provider,
                 model,
                 raw_response,
+                json.dumps(context_snapshot, ensure_ascii=False),
                 now,
                 now,
             ),
@@ -987,6 +1042,11 @@ def _decision_row_to_dict(row) -> dict[str, Any]:
     except ValueError:
         item["reasoning"] = []
     item.pop("reasoning_json", None)
+    try:
+        item["context_snapshot"] = json.loads(item.get("context_snapshot_json") or "{}")
+    except ValueError:
+        item["context_snapshot"] = {}
+    item.pop("context_snapshot_json", None)
     return item
 
 

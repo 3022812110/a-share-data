@@ -286,6 +286,60 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_ai_trade_decisions_stock_created
             ON ai_trade_decisions (stock_code, created_at DESC, id DESC);
 
+            CREATE TABLE IF NOT EXISTS ai_recommendation_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                policy_version TEXT NOT NULL,
+                account_snapshot_json TEXT NOT NULL,
+                market_context_json TEXT NOT NULL,
+                topic_context_json TEXT NOT NULL,
+                recommendations_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ai_recommendation_runs_account_created
+            ON ai_recommendation_runs (account_id, created_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS ai_recommendation_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                recommendation_date TEXT NOT NULL,
+                base_price REAL NOT NULL,
+                score REAL,
+                market_regime TEXT,
+                policy_version TEXT NOT NULL,
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                evaluated_trade_days INTEGER NOT NULL DEFAULT 0,
+                latest_evaluated_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(run_id, stock_code)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ai_recommendation_items_account_date
+            ON ai_recommendation_items (account_id, recommendation_date DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_ai_recommendation_items_pending
+            ON ai_recommendation_items (evaluated_trade_days, recommendation_date, stock_code);
+
+            CREATE TABLE IF NOT EXISTS paper_account_snapshots (
+                account_id TEXT NOT NULL,
+                snapshot_date TEXT NOT NULL,
+                total_assets REAL NOT NULL,
+                cash_balance REAL NOT NULL,
+                market_value REAL NOT NULL,
+                daily_pnl REAL NOT NULL DEFAULT 0,
+                total_return_pct REAL NOT NULL DEFAULT 0,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (account_id, snapshot_date)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_paper_account_snapshots_account_date
+            ON paper_account_snapshots (account_id, snapshot_date DESC);
+
             CREATE TABLE IF NOT EXISTS screening_chat_sessions (
                 context_key TEXT PRIMARY KEY,
                 summary_json TEXT NOT NULL,
@@ -401,6 +455,7 @@ def init_db() -> None:
             ("review_summary", "ALTER TABLE ai_trade_decisions ADD COLUMN review_summary TEXT"),
             ("lessons_learned", "ALTER TABLE ai_trade_decisions ADD COLUMN lessons_learned TEXT"),
             ("reviewed_at", "ALTER TABLE ai_trade_decisions ADD COLUMN reviewed_at TEXT"),
+            ("context_snapshot_json", "ALTER TABLE ai_trade_decisions ADD COLUMN context_snapshot_json TEXT"),
         ):
             if column_name not in ai_trade_columns:
                 connection.execute(column_sql)

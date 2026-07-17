@@ -1,8 +1,9 @@
-import { Badge, Button, Card, Space, Table, Tag, Typography } from "antd";
+import { Alert, Badge, Button, Card, Space, Table, Tag, Typography } from "antd";
 
 import PaperSummaryCards from "./PaperSummaryCards";
 import CompactEmpty from "./CompactEmpty";
 import MarketStatusNotice from "./MarketStatusNotice";
+import RecommendationPerformancePanel from "./RecommendationPerformancePanel";
 import { capText, colorStyle, numberText, percentText } from "../lib/formatters";
 
 const { Text } = Typography;
@@ -13,16 +14,21 @@ export default function PaperPortfolioPanel({
   recommendations = [],
   recommendationSummary,
   recommendationLoading,
+  recommendationPerformance,
+  performanceLoading,
   onSelectCode,
   onOpenReview,
   onQuickTrade,
   onRefreshRecommendations,
+  onRefreshPerformance,
 }) {
   const positions = portfolio?.positions ?? [];
   const trades = portfolio?.trades ?? [];
   const marketContext = recommendationSummary?.market_context ?? {};
+  const tradeGate = marketContext.trade_gate ?? {};
   const recommendationAccount = recommendationSummary?.account ?? {};
   const marketStatus = portfolio?.market_status ?? {};
+  const riskDiagnosis = portfolio?.risk_diagnosis ?? {};
   const marketOpen = marketStatus.is_open === true;
 
   const recommendationColumns = [
@@ -98,7 +104,7 @@ export default function PaperPortfolioPanel({
           <Button
             size="small"
             type="primary"
-            disabled={!marketOpen}
+            disabled={!marketOpen || tradeGate.allow_new_positions === false}
             onClick={(event) => {
               event.stopPropagation();
               onQuickTrade?.(
@@ -237,6 +243,26 @@ export default function PaperPortfolioPanel({
     <Space direction="vertical" size={10} style={{ width: "100%" }}>
       <MarketStatusNotice marketStatus={marketStatus} />
       <PaperSummaryCards portfolio={portfolio} />
+      {riskDiagnosis.label ? (
+        <Alert
+          showIcon
+          type={riskDiagnosis.level === "high" ? "error" : riskDiagnosis.level === "medium" ? "warning" : "success"}
+          message={`系统结论：${riskDiagnosis.label}`}
+          description={(
+            <Space direction="vertical" size={2}>
+              <Text>{riskDiagnosis.summary}</Text>
+              {(riskDiagnosis.flags ?? []).slice(0, 3).map((flag) => (
+                <Text type="secondary" key={flag}>· {flag}</Text>
+              ))}
+              {(riskDiagnosis.position_actions ?? []).slice(0, 3).map((item) => (
+                <Text type="secondary" key={`${item.stock_code}-${item.action}`}>
+                  · {item.stock_name}：{item.label}
+                </Text>
+              ))}
+            </Space>
+          )}
+        />
+      ) : null}
       <Card
         variant="borderless"
         className="table-card trade-recommendation-card"
@@ -257,10 +283,20 @@ export default function PaperPortfolioPanel({
             <Text type="secondary">上涨占比 {numberText(marketContext.rising_ratio)}%</Text>
             <Text type="secondary">涨停 {marketContext.limit_up_count ?? 0}</Text>
             <Text type="secondary">跌停 {marketContext.limit_down_count ?? 0}</Text>
-            <Text type="secondary">计划仓位 {numberText(recommendationAccount.planned_position_pct)}%</Text>
+            <Text type="secondary">当前仓位 {numberText(recommendationAccount.current_position_pct)}%</Text>
+            <Text type="secondary">新增计划 {numberText(recommendationAccount.planned_position_pct)}%</Text>
           </Space>
           <Text type="secondary">{marketContext.strategy ?? "先确认市场强弱，再做小仓训练。"}</Text>
         </div>
+        {tradeGate.status ? (
+          <Alert
+            showIcon
+            type={tradeGate.status === "blocked" ? "error" : tradeGate.status === "limited" ? "warning" : "info"}
+            message={`${tradeGate.label} · 总仓位上限 ${numberText(tradeGate.max_total_position_pct)}%`}
+            description={(tradeGate.reasons ?? []).join("；")}
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
         <Table
           rowKey="stock_code"
           size="small"
@@ -271,6 +307,11 @@ export default function PaperPortfolioPanel({
           onRow={(record) => ({ onClick: () => onSelectCode(record.stock_code) })}
         />
       </Card>
+      <RecommendationPerformancePanel
+        performance={recommendationPerformance}
+        loading={performanceLoading}
+        onRefresh={onRefreshPerformance}
+      />
       <Card variant="borderless" className="table-card" title="当前持仓" loading={loading}>
         <Table
           rowKey="stock_code"

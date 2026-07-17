@@ -7,6 +7,7 @@ from typing import Any
 
 from .data_health import expected_latest_trade_date, load_data_health
 from .db import get_connection
+from .recommendation_performance import refresh_recommendation_performance
 from .stock_market import sync_stock_market_snapshot
 from .sync import sync_daily_bars_for_codes
 
@@ -34,12 +35,18 @@ def sync_tracked_snapshot_daily_bars(stock_codes: list[str]) -> int:
                 high,
                 low,
                 volume,
-                amount,
+                CASE
+                    WHEN source = 'tencent' THEN amount * 10000.0
+                    ELSE amount
+                END AS amount,
                 change_pct,
                 change_amount AS change,
                 turnover_ratio,
                 pre_close,
-                'market_snapshot' AS source,
+                CASE
+                    WHEN source = 'tencent' THEN 'market_snapshot_amount_wan_to_yuan'
+                    ELSE 'market_snapshot'
+                END AS source,
                 1 AS adjust_type,
                 1 AS k_type,
                 fetched_at
@@ -86,19 +93,30 @@ def refresh_market_data(*, background: bool = False) -> dict[str, Any]:
         return {"status": "already_running", "data_health": load_data_health()}
     try:
         result = sync_stock_market_snapshot()
+        end_date = expected_latest_trade_date()
         with get_connection() as connection:
             tracked_rows = connection.execute(
                 """
                 SELECT stock_code FROM watchlist WHERE is_active = 1
                 UNION
                 SELECT stock_code FROM paper_positions WHERE quantity > 0
+                UNION
+                SELECT stock_code FROM (
+                    SELECT stock_code, MAX(recommendation_date) AS latest_recommendation_date
+                    FROM ai_recommendation_items
+                    WHERE evaluated_trade_days < 20
+                      AND recommendation_date >= date(?, '-60 days')
+                    GROUP BY stock_code
+                    ORDER BY latest_recommendation_date DESC
+                    LIMIT 60
+                )
                 ORDER BY stock_code
-                """
+                """,
+                (end_date.isoformat(),),
             ).fetchall()
         tracked_codes = [row["stock_code"] for row in tracked_rows]
         daily_results: list[dict[str, Any]] = []
         if tracked_codes:
-            end_date = expected_latest_trade_date()
             start_date = end_date - timedelta(days=45)
             try:
                 daily_results = sync_daily_bars_for_codes(
@@ -113,6 +131,10 @@ def refresh_market_data(*, background: bool = False) -> dict[str, Any]:
             snapshot_bar_count = 0
         result["tracked_daily_bars"] = daily_results
         result["snapshot_daily_bar_count"] = snapshot_bar_count
+        try:
+            result["recommendation_performance_updates"] = refresh_recommendation_performance()
+        except Exception:
+            result["recommendation_performance_updates"] = 0
         result["status"] = "completed"
         result["data_health"] = load_data_health()
         return result

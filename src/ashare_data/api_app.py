@@ -26,6 +26,7 @@ from .market_refresh_service import (
     stop_market_refresh_scheduler,
 )
 from .paper_trading import execute_paper_order, get_paper_portfolio, update_trade_review, upsert_trade_plan
+from .recommendation_performance import load_recommendation_performance
 from .screening_chat_history import load_screening_chat_history, save_screening_chat_history
 from .screening_ai import analyze_screening_chat, stream_screening_chat
 from .stock_market import sync_stock_market_snapshot
@@ -397,6 +398,11 @@ def ai_trade_decisions(
 @app.get("/api/ai-trade/recommendations")
 def ai_trade_recommendations(limit: int = 6) -> dict[str, object]:
     return generate_trade_recommendations(limit=limit)
+
+
+@app.get("/api/ai-trade/performance")
+def ai_trade_performance(limit: int = 60) -> dict[str, object]:
+    return load_recommendation_performance(limit=limit)
 
 
 @app.post("/api/ai-trade/decisions/{stock_code}")

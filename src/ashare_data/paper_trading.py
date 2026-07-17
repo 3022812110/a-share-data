@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .data_health import expected_latest_trade_date
 from .db import get_connection, init_db
 from .market_clock import china_now_str, get_a_share_market_status, require_a_share_market_open
+from .trade_risk import build_portfolio_risk_diagnosis, evaluate_buy_order_risk, load_market_risk_context
 from .watchlist import normalize_stock_code
 
 
@@ -374,8 +376,10 @@ def _close_plan(connection, plan_row, *, trade_id: int, closed_at: str, review: 
 
 def get_paper_portfolio(account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, object]:
     init_db()
+    snapshot_date = expected_latest_trade_date().isoformat()
     with get_connection() as connection:
         account = dict(_account_row(connection, account_id))
+        market_context = load_market_risk_context(connection, expected_trade_date=snapshot_date)
         position_rows = connection.execute(
             """
             SELECT
@@ -386,6 +390,7 @@ def get_paper_portfolio(account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, objec
                 p.avg_cost,
                 p.opened_at,
                 s.price AS current_price,
+                s.pre_close,
                 s.change_pct,
                 s.trade_time,
                 tp.id AS plan_id,
@@ -478,6 +483,15 @@ def get_paper_portfolio(account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, objec
             """,
             (account_id,),
         ).fetchone()
+        daily_realized_pnl_row = connection.execute(
+            """
+            SELECT COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+            FROM paper_trades
+            WHERE account_id = ?
+              AND substr(trade_time, 1, 10) = ?
+            """,
+            (account_id, snapshot_date),
+        ).fetchone()
         fee_row = connection.execute(
             """
             SELECT COALESCE(SUM(total_fees), 0) AS total_fees
@@ -496,26 +510,158 @@ def get_paper_portfolio(account_id: str = DEFAULT_ACCOUNT_ID) -> dict[str, objec
     trades = [dict(row) for row in trade_rows]
     market_value = round(sum(float(item["market_value"] or 0) for item in positions), 2)
     unrealized_pnl = round(sum(float(item["unrealized_pnl"] or 0) for item in positions), 2)
+    intraday_position_pnl = sum(
+        (float(item["current_price"]) - float(item["pre_close"])) * int(item["quantity"])
+        for item in positions
+        if item.get("current_price") is not None and item.get("pre_close") is not None
+    )
+    daily_pnl = round(intraday_position_pnl + float(daily_realized_pnl_row["realized_pnl"] or 0), 2)
     cash_balance = float(account["cash_balance"])
     total_assets = round(cash_balance + market_value, 2)
     initial_cash = float(account["initial_cash"])
     total_return_pct = round(((total_assets / initial_cash) - 1.0) * 100, 2) if initial_cash else 0.0
+    fetched_at = _utc_now_str()
 
+    with get_connection() as connection:
+        previous_snapshot = connection.execute(
+            """
+            SELECT total_assets
+            FROM paper_account_snapshots
+            WHERE account_id = ? AND snapshot_date < ?
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+            """,
+            (account_id, snapshot_date),
+        ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO paper_account_snapshots (
+                account_id, snapshot_date, total_assets, cash_balance,
+                market_value, daily_pnl, total_return_pct, fetched_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, snapshot_date) DO UPDATE SET
+                total_assets = excluded.total_assets,
+                cash_balance = excluded.cash_balance,
+                market_value = excluded.market_value,
+                daily_pnl = excluded.daily_pnl,
+                total_return_pct = excluded.total_return_pct,
+                fetched_at = excluded.fetched_at
+            """,
+            (
+                account_id,
+                snapshot_date,
+                total_assets,
+                cash_balance,
+                market_value,
+                daily_pnl,
+                total_return_pct,
+                fetched_at,
+            ),
+        )
+        peak_row = connection.execute(
+            """
+            SELECT MAX(total_assets) AS peak_total_assets
+            FROM paper_account_snapshots
+            WHERE account_id = ?
+            """,
+            (account_id,),
+        ).fetchone()
+        equity_rows = connection.execute(
+            """
+            SELECT snapshot_date, total_assets, cash_balance, market_value,
+                   daily_pnl, total_return_pct
+            FROM (
+                SELECT *
+                FROM paper_account_snapshots
+                WHERE account_id = ?
+                ORDER BY snapshot_date DESC
+                LIMIT 120
+            )
+            ORDER BY snapshot_date
+            """,
+            (account_id,),
+        ).fetchall()
+
+    previous_assets = float(previous_snapshot["total_assets"] or 0) if previous_snapshot else 0.0
+    daily_return_pct = round((daily_pnl / previous_assets) * 100, 2) if previous_assets else round((daily_pnl / total_assets) * 100, 2) if total_assets else 0.0
+    peak_total_assets = float(peak_row["peak_total_assets"] or total_assets)
+    drawdown_pct = round(((total_assets / peak_total_assets) - 1) * 100, 2) if peak_total_assets else 0.0
+    account_payload = {
+        **account,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized_pnl,
+        "realized_pnl": round(float(realized_pnl_row["realized_pnl"] or 0), 2),
+        "total_fees": round(float(fee_row["total_fees"] or 0), 2),
+        "total_assets": total_assets,
+        "position_count": len(positions),
+        "total_return_pct": total_return_pct,
+        "daily_pnl": daily_pnl,
+        "daily_return_pct": daily_return_pct,
+        "peak_total_assets": round(peak_total_assets, 2),
+        "drawdown_pct": drawdown_pct,
+        "trade_rules": _trade_rules_payload(),
+    }
+    risk_diagnosis = build_portfolio_risk_diagnosis(
+        account=account_payload,
+        positions=positions,
+        market_context=market_context,
+    )
     return {
-        "account": {
-            **account,
-            "market_value": market_value,
-            "unrealized_pnl": unrealized_pnl,
-            "realized_pnl": round(float(realized_pnl_row["realized_pnl"] or 0), 2),
-            "total_fees": round(float(fee_row["total_fees"] or 0), 2),
-            "total_assets": total_assets,
-            "position_count": len(positions),
-            "total_return_pct": total_return_pct,
-            "trade_rules": _trade_rules_payload(),
-        },
+        "account": account_payload,
         "positions": positions,
         "trades": trades,
         "market_status": get_a_share_market_status(),
+        "market_context": market_context,
+        "risk_diagnosis": risk_diagnosis,
+        "equity_curve": [dict(row) for row in equity_rows],
+    }
+
+
+def _buy_risk_account_metrics(connection, *, account, account_id: str, stock_code: str, trade_date: str) -> dict[str, float]:
+    position_row = connection.execute(
+        """
+        SELECT
+            COALESCE(SUM(p.quantity * COALESCE(s.price, p.avg_cost)), 0) AS market_value,
+            COALESCE(SUM(
+                CASE
+                    WHEN s.price IS NOT NULL AND s.pre_close IS NOT NULL
+                    THEN p.quantity * (s.price - s.pre_close)
+                    ELSE 0
+                END
+            ), 0) AS intraday_position_pnl,
+            COALESCE(SUM(
+                CASE
+                    WHEN p.stock_code = ?
+                    THEN p.quantity * COALESCE(s.price, p.avg_cost)
+                    ELSE 0
+                END
+            ), 0) AS current_stock_value
+        FROM paper_positions p
+        LEFT JOIN stock_market_snapshot s ON s.stock_code = p.stock_code
+        WHERE p.account_id = ?
+        """,
+        (stock_code, account_id),
+    ).fetchone()
+    realized_row = connection.execute(
+        """
+        SELECT COALESCE(SUM(realized_pnl), 0) AS realized_pnl
+        FROM paper_trades
+        WHERE account_id = ?
+          AND substr(trade_time, 1, 10) = ?
+        """,
+        (account_id, trade_date),
+    ).fetchone()
+    cash_balance = float(account["cash_balance"] or 0)
+    market_value = float(position_row["market_value"] or 0)
+    total_assets = cash_balance + market_value
+    initial_cash = float(account["initial_cash"] or 0)
+    return {
+        "market_value": market_value,
+        "current_stock_value": float(position_row["current_stock_value"] or 0),
+        "daily_pnl": float(position_row["intraday_position_pnl"] or 0) + float(realized_row["realized_pnl"] or 0),
+        "total_assets": total_assets,
+        "account_return_pct": ((total_assets / initial_cash) - 1) * 100 if initial_cash else 0.0,
     }
 
 
@@ -561,8 +707,29 @@ def execute_paper_order(
         active_plan = _active_plan(connection, account_id, normalized_code)
         cash_balance = float(account["cash_balance"])
         realized_pnl = 0.0
+        risk_check = None
 
         if normalized_side == "buy":
+            market_context = load_market_risk_context(connection, expected_trade_date=trade_date)
+            risk_metrics = _buy_risk_account_metrics(
+                connection,
+                account=account,
+                account_id=account_id,
+                stock_code=normalized_code,
+                trade_date=trade_date,
+            )
+            risk_check = evaluate_buy_order_risk(
+                market_context=market_context,
+                total_assets=risk_metrics["total_assets"],
+                current_market_value=risk_metrics["market_value"],
+                current_stock_value=risk_metrics["current_stock_value"],
+                order_cash=estimate["cash_delta"],
+                daily_pnl=risk_metrics["daily_pnl"],
+                account_return_pct=risk_metrics["account_return_pct"],
+                stock_change_pct=snapshot["change_pct"],
+            )
+            if not risk_check["allowed"]:
+                raise ValueError(f"风控拒绝买入：{'；'.join(risk_check['reasons'])}")
             if cash_balance < estimate["cash_delta"]:
                 raise ValueError("insufficient cash balance")
             lot_cost_price = round(estimate["cash_delta"] / normalized_quantity, 4)
@@ -687,6 +854,7 @@ def execute_paper_order(
         "realized_pnl": realized_pnl,
         "position_quantity": next_quantity,
         "avg_cost": next_avg_cost,
+        "risk_check": risk_check,
         "portfolio": portfolio,
     }
 

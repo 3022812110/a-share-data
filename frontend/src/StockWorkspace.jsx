@@ -105,6 +105,8 @@ export default function StockWorkspace() {
   const [tradeRecommendations, setTradeRecommendations] = React.useState([]);
   const [tradeRecommendationSummary, setTradeRecommendationSummary] = React.useState(null);
   const [tradeRecommendationLoading, setTradeRecommendationLoading] = React.useState(false);
+  const [recommendationPerformance, setRecommendationPerformance] = React.useState(null);
+  const [performanceLoading, setPerformanceLoading] = React.useState(false);
   const [form] = Form.useForm();
   const [paperForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
@@ -212,6 +214,18 @@ export default function StockWorkspace() {
       message.error(error.message || "加载训练推荐失败");
     } finally {
       setTradeRecommendationLoading(false);
+    }
+  }, [message]);
+
+  const loadRecommendationPerformance = React.useCallback(async () => {
+    setPerformanceLoading(true);
+    try {
+      const data = await request("/api/ai-trade/performance?limit=60");
+      setRecommendationPerformance(data);
+    } catch (error) {
+      message.error(error.message || "核算历史建议失败");
+    } finally {
+      setPerformanceLoading(false);
     }
   }, [message]);
 
@@ -328,10 +342,11 @@ export default function StockWorkspace() {
     } else if (activeMenu === "paper") {
       loadPaperPortfolio().catch(() => {});
       loadTradeRecommendations().catch(() => {});
+      loadRecommendationPerformance().catch(() => {});
     } else {
       loadList().catch(() => {});
     }
-  }, [activeMenu, loadList, loadPaperPortfolio, loadScreening, loadTradeRecommendations]);
+  }, [activeMenu, loadList, loadPaperPortfolio, loadRecommendationPerformance, loadScreening, loadTradeRecommendations]);
 
   React.useEffect(() => {
     loadDetail().catch(() => {});
@@ -356,7 +371,7 @@ export default function StockWorkspace() {
         method: "POST",
         body: JSON.stringify({}),
       });
-      await Promise.all([loadSummary(), loadList(), loadDetail(), loadScreening(), loadTradeRecommendations()]);
+      await Promise.all([loadSummary(), loadList(), loadDetail(), loadScreening(), loadTradeRecommendations(), loadRecommendationPerformance()]);
       message.success("全市场快照已刷新");
     } catch (error) {
       message.error(error.message || "刷新失败");
@@ -835,10 +850,13 @@ export default function StockWorkspace() {
                   recommendations={tradeRecommendations}
                   recommendationSummary={tradeRecommendationSummary}
                   recommendationLoading={tradeRecommendationLoading}
+                  recommendationPerformance={recommendationPerformance}
+                  performanceLoading={performanceLoading}
                   onSelectCode={handleOpenDetail}
                   onOpenReview={handleOpenReview}
                   onQuickTrade={handleQuickTrade}
                   onRefreshRecommendations={loadTradeRecommendations}
+                  onRefreshPerformance={loadRecommendationPerformance}
                 />
               ) : activeMenu === "analysis" || activeMenu === "changes" || activeMenu === "funds" ? null : (
                 <StockTable
