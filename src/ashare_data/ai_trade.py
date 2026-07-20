@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import Any
 
 from .api_queries import load_stock_detail
 from .data_health import expected_latest_trade_date
 from .db import get_connection, init_db
 from .market_feeds import load_market_insights
+from .market_regime import map_current_market_regime
 from .paper_trading import DEFAULT_ACCOUNT_ID, execute_paper_order, get_paper_portfolio, upsert_trade_plan
 from .recommendation_performance import register_recommendation_items
 from .screening_ai import (
@@ -17,6 +19,12 @@ from .screening_ai import (
     _clamp_float,
     _clamp_int,
     _parse_json_object,
+)
+from .strategy_lab import load_latest_strategy_stability
+from .strategy_prevalidation import (
+    get_candidate_prevalidation_status,
+    load_candidate_validations,
+    start_candidate_prevalidation,
 )
 from .trade_risk import RISK_POLICY_VERSION, build_market_risk_context, load_market_risk_context
 
@@ -49,12 +57,27 @@ def generate_ai_trade_decision(
             connection,
             expected_trade_date=expected_latest_trade_date().isoformat(),
         )
+    stability_result = load_latest_strategy_stability()
+    validation_code = str(snapshot.get("stock_code") or "")
+    candidate_validations = load_candidate_validations([validation_code])
+    if validation_code not in candidate_validations:
+        start_candidate_prevalidation([validation_code])
+    evidence_result = _merge_candidate_validation_results(
+        stability_result or {},
+        candidate_validations,
+    )
+    strategy_evidence = _build_candidate_strategy_evidence(
+        validation_code,
+        stability_result=evidence_result,
+        current_market_regime=market_context.get("regime"),
+    )
     input_prompt = _build_trade_user_prompt(
         snapshot=snapshot,
         detail=detail,
         portfolio=portfolio,
         recent_decisions=recent_decisions,
         market_context=market_context,
+        strategy_evidence=strategy_evidence,
     )
     messages = [
         {
@@ -80,6 +103,27 @@ def generate_ai_trade_decision(
         decision["position_size_pct"] = 0
         decision["summary"] = f"暂停买入：{reasons[0]}。"
         decision["reasoning"] = [*reasons, *decision.get("reasoning", [])][:5]
+    elif decision["action"] == "buy" and strategy_evidence["action"] == "block":
+        decision["action"] = "watch"
+        decision["quantity"] = 0
+        decision["position_size_pct"] = 0
+        decision["confidence"] = "低"
+        decision["summary"] = f"转为观察：{strategy_evidence['reason']}"
+        decision["reasoning"] = [strategy_evidence["reason"], *decision.get("reasoning", [])][:5]
+    elif decision["action"] == "buy" and strategy_evidence["action"] == "caution":
+        decision["action"] = "watch"
+        decision["quantity"] = 0
+        decision["position_size_pct"] = 0
+        decision["confidence"] = "低"
+        decision["summary"] = f"证据不足，先观察：{strategy_evidence['reason']}"
+        decision["reasoning"] = [strategy_evidence["reason"], *decision.get("reasoning", [])][:5]
+    elif decision["action"] == "buy" and strategy_evidence["action"] == "untested":
+        decision["action"] = "watch"
+        decision["quantity"] = 0
+        decision["position_size_pct"] = 0
+        decision["confidence"] = "低"
+        decision["summary"] = f"尚未验证，先观察：{strategy_evidence['reason']}"
+        decision["reasoning"] = [strategy_evidence["reason"], *decision.get("reasoning", [])][:5]
     return _insert_trade_decision(
         account_id=account_id,
         provider=prepared["provider"],
@@ -89,6 +133,7 @@ def generate_ai_trade_decision(
         context_snapshot={
             "policy_version": RISK_POLICY_VERSION,
             "market_context": market_context,
+            "strategy_evidence": strategy_evidence,
             "input_prompt": input_prompt,
         },
     )
@@ -129,6 +174,181 @@ def get_latest_ai_trade_decision(
 ) -> dict[str, Any] | None:
     decisions = list_ai_trade_decisions(account_id=account_id, stock_code=stock_code, limit=1)
     return decisions[0] if decisions else None
+
+
+def _build_candidate_strategy_evidence(
+    stock_code: str,
+    *,
+    stability_result: dict[str, Any] | None,
+    current_market_regime: str | None,
+) -> dict[str, Any]:
+    normalized_code = str(stock_code or "").strip()
+    mapped_regime = map_current_market_regime(current_market_regime)
+    result = stability_result or {}
+    record = next(
+        (
+            item
+            for item in result.get("ranking") or []
+            if str(item.get("stock_code") or "").strip() == normalized_code
+        ),
+        None,
+    )
+    if not record:
+        return {
+            "status": "untested",
+            "label": "策略未验证",
+            "action": "untested",
+            "score_adjustment": -8.0,
+            "position_multiplier": 0.5,
+            "current_market_regime": current_market_regime,
+            "mapped_historical_regime": mapped_regime,
+            "reason": "最新稳定性股票池没有该标的，只能小仓训练，不能引用策略回测作为买入依据。",
+            "stability_run_id": result.get("run_id"),
+        }
+
+    robustness = record.get("robustness") or {}
+    aggregate = record.get("aggregate") or {}
+    status = str(robustness.get("status") or "insufficient")
+    strategy_key = str(record.get("best_strategy_key") or "")
+    strategy_name = str(record.get("best_strategy_name") or strategy_key or "未知策略")
+    regime_metrics = next(
+        (
+            item
+            for item in aggregate.get("by_market_regime") or []
+            if item.get("market_regime") == mapped_regime
+        ),
+        None,
+    )
+    family_compatibility = {
+        "trend_follow": {"上涨"},
+        "breakout": {"上涨"},
+        "mean_reversion": {"震荡", "下跌"},
+    }
+    if mapped_regime == "未知":
+        regime_match = None
+        regime_reason = "当前市场状态无法映射到历史分类。"
+    elif regime_metrics:
+        enough_regime_samples = int(regime_metrics.get("total_trades") or 0) >= 2
+        positive_regime = (
+            float(regime_metrics.get("average_return_pct") or 0) > 0
+            and float(regime_metrics.get("average_excess_return_pct") or 0) >= 0
+        )
+        regime_match = positive_regime if enough_regime_samples else None
+        regime_reason = (
+            f"{mapped_regime}窗口平均收益 {float(regime_metrics.get('average_return_pct') or 0):.2f}%、"
+            f"平均超额 {float(regime_metrics.get('average_excess_return_pct') or 0):.2f}%、"
+            f"完整交易 {int(regime_metrics.get('total_trades') or 0)} 次。"
+        )
+    elif not strategy_key:
+        regime_match = None
+        regime_reason = "滚动验证尚未形成可评估策略。"
+    else:
+        allowed_regimes = family_compatibility.get(strategy_key, set())
+        regime_match = None if mapped_regime in allowed_regimes else False
+        regime_reason = (
+            f"历史滚动窗口没有覆盖当前{mapped_regime}状态。"
+            if mapped_regime in allowed_regimes
+            else f"{strategy_name}不属于当前{mapped_regime}状态的优先策略。"
+        )
+
+    base = {
+        "status": status,
+        "label": robustness.get("label") or "样本不足",
+        "strategy_key": strategy_key,
+        "strategy_name": strategy_name,
+        "current_market_regime": current_market_regime,
+        "mapped_historical_regime": mapped_regime,
+        "market_regime_match": regime_match,
+        "market_regime_metrics": regime_metrics,
+        "stability_run_id": result.get("run_id"),
+        "candidate_validation_id": record.get("validation_id"),
+        "evidence_source": "candidate_prevalidation" if record.get("validation_id") else "stability_pool",
+        "average_return_pct": aggregate.get("average_return_pct"),
+        "average_excess_return_pct": aggregate.get("average_excess_return_pct"),
+        "positive_window_pct": aggregate.get("positive_window_pct"),
+        "worst_drawdown_pct": aggregate.get("worst_drawdown_pct"),
+    }
+    if status == "reject":
+        return {
+            **base,
+            "action": "block",
+            "score_adjustment": -100.0,
+            "position_multiplier": 0.0,
+            "reason": f"{strategy_name}已在滚动样本外验证中失效；{regime_reason}",
+        }
+    if regime_match is False:
+        return {
+            **base,
+            "action": "block",
+            "score_adjustment": -100.0,
+            "position_multiplier": 0.0,
+            "reason": f"策略与当前市场状态不匹配；{regime_reason}",
+        }
+    if status == "stable" and regime_match is True:
+        return {
+            **base,
+            "action": "support",
+            "score_adjustment": 20.0,
+            "position_multiplier": 1.0,
+            "reason": f"{strategy_name}跨窗口稳定，且当前市场状态有正向历史证据；{regime_reason}",
+        }
+    return {
+        **base,
+        "action": "caution",
+        "score_adjustment": -15.0 if status == "observe" else -20.0,
+        "position_multiplier": 0.5 if status == "observe" else 0.4,
+        "reason": f"策略证据尚不足以支持正常仓位；{regime_reason}",
+    }
+
+
+def _merge_candidate_validation_results(
+    stability_result: dict[str, Any] | None,
+    validations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    stability_result = stability_result or {}
+    merged_ranking = list(validations.values())
+    validated_codes = set(validations)
+    merged_ranking.extend(
+        item
+        for item in stability_result.get("ranking") or []
+        if str(item.get("stock_code") or "") not in validated_codes
+    )
+    return {
+        **stability_result,
+        "ranking": merged_ranking,
+        "candidate_validation_count": len(validations),
+    }
+
+
+def _build_strategy_evidence_context(
+    stability_result: dict[str, Any],
+    *,
+    current_market_regime: str | None,
+    candidate_actions: Counter,
+) -> dict[str, Any]:
+    return {
+        "status": stability_result.get("status"),
+        "run_id": stability_result.get("run_id"),
+        "created_at": stability_result.get("created_at"),
+        "evaluated_count": stability_result.get("evaluated_count", 0),
+        "stable_count": stability_result.get("stable_count", 0),
+        "observe_count": stability_result.get("observe_count", 0),
+        "reject_count": stability_result.get("reject_count", 0),
+        "current_market_regime": current_market_regime,
+        "mapped_historical_regime": map_current_market_regime(current_market_regime),
+        "candidate_actions": {
+            "support": int(candidate_actions.get("support", 0)),
+            "caution": int(candidate_actions.get("caution", 0)),
+            "block": int(candidate_actions.get("block", 0)),
+            "untested": int(candidate_actions.get("untested", 0)),
+        },
+        "policy": [
+            "跨窗口稳定且当前市场状态匹配时加分。",
+            "仅观察、样本不足或当前状态证据不足时只进入观察区，不生成买入计划。",
+            "滚动样本外失效或策略与当前市场状态明确不匹配时禁止进入买入推荐。",
+            "未完成候选预验证的标的只进入观察区，不能引用策略回测作为买入依据。",
+        ],
+    }
 
 
 def generate_trade_recommendations(
@@ -198,8 +418,10 @@ def generate_trade_recommendations(
     except Exception:
         insights = {}
     topic_context = _build_recommendation_topic_context(insights)
+    stability_result = load_latest_strategy_stability()
+    strategy_candidate_actions: Counter = Counter()
 
-    scored_candidates = []
+    base_candidates = []
     for row in candidate_rows:
         candidate = dict(row)
         theme_tags = _infer_theme_tags(candidate["stock_name"], candidate["stock_code"])
@@ -210,11 +432,45 @@ def generate_trade_recommendations(
             topic_context=topic_context,
             total_assets=total_assets,
         )
-        candidate["score"] = score
+        candidate["base_score"] = score
         candidate["theme_tags"] = theme_tags
+        base_candidates.append(candidate)
+
+    base_candidates.sort(key=lambda item: (item["base_score"], item.get("amount") or 0), reverse=True)
+    all_candidate_codes = [str(item["stock_code"]) for item in base_candidates]
+    prevalidation_target_codes = [
+        str(item["stock_code"])
+        for item in base_candidates[:max(8, target_limit * 2)]
+    ]
+    prevalidation_status = start_candidate_prevalidation(prevalidation_target_codes)
+    candidate_validations = load_candidate_validations(all_candidate_codes)
+    evidence_result = _merge_candidate_validation_results(stability_result, candidate_validations)
+
+    scored_candidates = []
+    for candidate in base_candidates:
+        strategy_evidence = _build_candidate_strategy_evidence(
+            candidate["stock_code"],
+            stability_result=evidence_result,
+            current_market_regime=market_context.get("regime"),
+        )
+        strategy_candidate_actions[strategy_evidence["action"]] += 1
+        if strategy_evidence["action"] == "block":
+            continue
+        score = float(candidate["base_score"])
+        score += float(strategy_evidence.get("score_adjustment") or 0)
+        candidate["score"] = round(score, 2)
+        candidate["strategy_evidence"] = strategy_evidence
         scored_candidates.append(candidate)
 
-    scored_candidates.sort(key=lambda item: (item["score"], item.get("amount") or 0), reverse=True)
+    evidence_priority = {"support": 2, "caution": 1, "untested": 0}
+    scored_candidates.sort(
+        key=lambda item: (
+            evidence_priority.get((item.get("strategy_evidence") or {}).get("action"), 0),
+            item["score"],
+            item.get("amount") or 0,
+        ),
+        reverse=True,
+    )
 
     trade_gate = market_context["trade_gate"]
     current_market_value = float(account.get("market_value") or 0)
@@ -227,25 +483,23 @@ def generate_trade_recommendations(
     for candidate in scored_candidates:
         if len(recommendations) >= target_limit:
             break
-        remaining_budget = target_deploy_cash - planned_cash
-        if remaining_budget <= 0:
-            break
-
         price = float(candidate.get("price") or 0)
         if price <= 0:
             continue
-        lot_cash = price * 100
-        if lot_cash > cash_balance - planned_cash:
-            continue
-        if lot_cash > per_position_cap:
-            continue
-
-        quantity_budget = min(per_position_cap, remaining_budget)
-        quantity = int(quantity_budget // price // 100) * 100
-        if quantity < 100:
-            quantity = 100 if lot_cash <= remaining_budget else 0
-        if quantity < 100:
-            continue
+        evidence_action = (candidate.get("strategy_evidence") or {}).get("action")
+        quantity = 0
+        if evidence_action == "support":
+            remaining_budget = target_deploy_cash - planned_cash
+            lot_cash = price * 100
+            if remaining_budget <= 0 or lot_cash > cash_balance - planned_cash or lot_cash > per_position_cap:
+                continue
+            position_multiplier = float((candidate.get("strategy_evidence") or {}).get("position_multiplier") or 1.0)
+            quantity_budget = min(per_position_cap, remaining_budget) * position_multiplier
+            quantity = int(quantity_budget // price // 100) * 100
+            if quantity < 100:
+                quantity = 100 if lot_cash <= remaining_budget else 0
+            if quantity < 100:
+                continue
 
         recommendation = _build_recommendation_item(
             candidate,
@@ -255,7 +509,21 @@ def generate_trade_recommendations(
             total_assets=total_assets,
         )
         recommendations.append(recommendation)
-        planned_cash += float(recommendation["estimated_cash"])
+        if recommendation["action"] == "buy":
+            planned_cash += float(recommendation["estimated_cash"])
+
+    followup_validation_codes = [
+        str(item["stock_code"])
+        for item in recommendations
+        if (item.get("strategy_evidence") or {}).get("action") == "untested"
+    ]
+    if followup_validation_codes:
+        followup_status = start_candidate_prevalidation(followup_validation_codes)
+        if followup_status.get("job_id") != prevalidation_status.get("job_id"):
+            prevalidation_status = followup_status
+        prevalidation_target_codes = list(
+            dict.fromkeys([*prevalidation_target_codes, *followup_validation_codes])
+        )
 
     generated_at = _utc_now_str()
     account_snapshot = {
@@ -267,11 +535,22 @@ def generate_trade_recommendations(
         "planned_cash": round(planned_cash, 2),
         "planned_position_pct": round((planned_cash / total_assets) * 100, 2) if total_assets else 0,
     }
+    strategy_context = _build_strategy_evidence_context(
+        evidence_result,
+        current_market_regime=market_context.get("regime"),
+        candidate_actions=strategy_candidate_actions,
+    )
+    strategy_context["prevalidation"] = {
+        **prevalidation_status,
+        "target_codes": prevalidation_target_codes,
+        "available_validations": len(candidate_validations),
+    }
     run_id = _insert_recommendation_run(
         account_id=account_id,
         account_snapshot=account_snapshot,
         market_context=market_context,
         topic_context=topic_context,
+        strategy_context=strategy_context,
         recommendations=recommendations,
         generated_at=generated_at,
     )
@@ -285,6 +564,8 @@ def generate_trade_recommendations(
         },
         "market_context": market_context,
         "topic_context": topic_context,
+        "strategy_context": strategy_context,
+        "prevalidation": get_candidate_prevalidation_status(),
         "recommendations": recommendations,
         "rules": [
             "9:35 后再确认盘面，不用集合竞价冲进去。",
@@ -437,16 +718,21 @@ def _build_recommendation_item(
     turnover_ratio = float(candidate.get("turnover_ratio") or 0)
     volume_ratio = float(candidate.get("volume_ratio") or 0)
     amount_yi = round(float(candidate.get("amount") or 0) / 10000, 2)
+    strategy_evidence = candidate.get("strategy_evidence") or {}
+    recommendation_action = "buy" if strategy_evidence.get("action") == "support" and quantity >= 100 else "watch"
+    quantity = quantity if recommendation_action == "buy" else 0
     stop_loss_pct = 0.065 if change_pct >= 5 or turnover_ratio >= 10 else 0.055
     target_pct = 0.12 if change_pct >= 5 else 0.1
     risk_level = "高" if change_pct >= 7 or turnover_ratio >= 12 else "中"
     confidence = "中"
     if market_context.get("regime") == "偏强" and amount_yi >= 20 and candidate.get("theme_tags"):
         confidence = "高"
+    if strategy_evidence.get("action") in {"caution", "untested"}:
+        confidence = "低"
 
     entry_zone_low = round(price * (0.985 if change_pct < 5 else 0.97), 2)
     entry_zone_high = round(price * 1.015, 2)
-    estimated_cash = round(price * quantity, 2)
+    estimated_cash = round(price * quantity, 2) if recommendation_action == "buy" else 0.0
     stop_loss_price = round(price * (1 - stop_loss_pct), 2)
     take_profit_price = round(price * (1 + target_pct), 2)
     position_pct = round((estimated_cash / total_assets) * 100, 2) if total_assets else 0
@@ -457,13 +743,14 @@ def _build_recommendation_item(
         f"个股涨幅 {change_pct:.2f}%，有强度但未进入 20cm 极端追高区。",
         f"换手 {turnover_ratio:.2f}%，量比 {volume_ratio:.2f}，成交约 {amount_yi:.2f} 亿，流动性适合训练。",
         f"主题标签：{'、'.join(theme_tags)}。",
+        f"策略证据：{strategy_evidence.get('reason') or '尚未形成滚动样本外证据。'}",
     ]
 
     return {
         "stock_code": candidate.get("stock_code"),
         "market": candidate.get("market"),
         "stock_name": candidate.get("stock_name"),
-        "action": "buy",
+        "action": recommendation_action,
         "price": round(price, 2),
         "change_pct": round(change_pct, 2),
         "turnover_ratio": round(turnover_ratio, 2),
@@ -483,7 +770,12 @@ def _build_recommendation_item(
         "planned_holding_days": 3,
         "confidence": confidence,
         "risk_level": risk_level,
-        "entry_reason": f"{'、'.join(theme_tags)}方向活跃，放量上行但仓位可控。",
+        "strategy_evidence": strategy_evidence,
+        "entry_reason": (
+            f"{'、'.join(theme_tags)}方向活跃，且策略证据通过当前行情门槛。"
+            if recommendation_action == "buy"
+            else f"{'、'.join(theme_tags)}方向活跃，但策略证据尚未达到买入门槛。"
+        ),
         "invalidation_condition": "高开超过4%不追；跌破止损位、放量长阴或主题退潮则退出。",
         "plan_note": "系统训练推荐：按小仓位试单，复盘重点看主线是否延续和止损是否执行。",
         "reasons": reasons,
@@ -497,6 +789,7 @@ def _build_recommendation_item(
             "trade_time": candidate.get("trade_time"),
             "fetched_at": candidate.get("fetched_at"),
             "policy_version": RISK_POLICY_VERSION,
+            "strategy_stability_run_id": strategy_evidence.get("stability_run_id"),
         },
     }
 
@@ -507,6 +800,7 @@ def _insert_recommendation_run(
     account_snapshot: dict[str, Any],
     market_context: dict[str, Any],
     topic_context: dict[str, Any],
+    strategy_context: dict[str, Any],
     recommendations: list[dict[str, Any]],
     generated_at: str,
 ) -> int:
@@ -515,10 +809,11 @@ def _insert_recommendation_run(
             """
             INSERT INTO ai_recommendation_runs (
                 account_id, policy_version, account_snapshot_json,
-                market_context_json, topic_context_json, recommendations_json,
+                market_context_json, topic_context_json, strategy_context_json,
+                recommendations_json,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 account_id,
@@ -526,6 +821,7 @@ def _insert_recommendation_run(
                 json.dumps(account_snapshot, ensure_ascii=False),
                 json.dumps(market_context, ensure_ascii=False),
                 json.dumps(topic_context, ensure_ascii=False),
+                json.dumps(strategy_context, ensure_ascii=False),
                 json.dumps(recommendations, ensure_ascii=False),
                 generated_at,
             ),
@@ -737,6 +1033,7 @@ def _build_trade_user_prompt(
     portfolio: dict[str, Any],
     recent_decisions: list[dict[str, Any]],
     market_context: dict[str, Any],
+    strategy_evidence: dict[str, Any],
 ) -> str:
     research = detail.get("research") or {}
     feeds = detail.get("feeds") or {}
@@ -842,6 +1139,7 @@ def _build_trade_user_prompt(
             "recent_trades": recent_trades,
         },
         "market_risk_context": market_context,
+        "strategy_stability_evidence": strategy_evidence,
         "recent_ai_decisions": recent_decisions[:6],
     }
     return "\n\n".join(
@@ -857,6 +1155,7 @@ def _build_trade_user_prompt(
                 "6. summary 要先给结论，再给一句核心原因。"
                 "7. reasoning 要给 3-5 条简短理由。"
                 "8. 如果当前更适合观察而不是交易，action 应该是 watch 或 avoid。"
+                "9. 滚动样本外失效、策略与当前市场状态不匹配或证据仅观察时，不得输出 buy。"
             ),
             (
                 'JSON 格式固定为：'

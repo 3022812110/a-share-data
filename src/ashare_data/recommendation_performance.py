@@ -61,6 +61,10 @@ def register_recommendation_items(
     recommendation_date = latest_trade_time[:10] if len(latest_trade_time) >= 10 else created_at[:10]
     rows = []
     for item in recommendations:
+        if str(item.get("action") or "buy") != "buy":
+            continue
+        if int(item.get("recommended_quantity") or 0) < 100:
+            continue
         base_price = float(item.get("price") or 0)
         stock_code = str(item.get("stock_code") or "").strip()
         if not stock_code or base_price <= 0:

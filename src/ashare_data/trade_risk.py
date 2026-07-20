@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 
-RISK_POLICY_VERSION = "2026-07-17.v1"
+RISK_POLICY_VERSION = "2026-07-20.v2"
 MIN_MARKET_STOCK_COUNT = 3000
 MAX_DAILY_LOSS_PCT = -2.0
 MAX_ACCOUNT_LOSS_PCT = -8.0

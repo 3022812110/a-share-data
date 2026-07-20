@@ -31,6 +31,8 @@ from .screening_chat_history import load_screening_chat_history, save_screening_
 from .screening_ai import analyze_screening_chat, stream_screening_chat
 from .stock_market import sync_stock_market_snapshot
 from .stock_changes import load_stock_change_history, load_stock_change_types, sync_stock_changes
+from .strategy_lab import load_latest_strategy_stability, run_strategy_lab, run_strategy_stability_lab
+from .strategy_prevalidation import get_candidate_prevalidation_status
 from .watchlist import delete_watchlist_item, update_watchlist_targets
 
 
@@ -400,6 +402,11 @@ def ai_trade_recommendations(limit: int = 6) -> dict[str, object]:
     return generate_trade_recommendations(limit=limit)
 
 
+@app.get("/api/strategy-prevalidation/status")
+def strategy_prevalidation_status() -> dict[str, object]:
+    return get_candidate_prevalidation_status()
+
+
 @app.get("/api/ai-trade/performance")
 def ai_trade_performance(limit: int = 60) -> dict[str, object]:
     return load_recommendation_performance(limit=limit)
@@ -504,6 +511,46 @@ def backtest(
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/strategy-lab/{stock_code}")
+def strategy_lab(
+    stock_code: str,
+    initial_cash: float = 100000.0,
+    max_position_pct: float = 30.0,
+) -> dict[str, object]:
+    try:
+        return run_strategy_lab(
+            stock_code,
+            initial_cash=initial_cash,
+            max_position_pct=max_position_pct / 100,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/strategy-stability")
+def strategy_stability(
+    stock_codes: str | None = None,
+    max_stocks: int = 8,
+    initial_cash: float = 100000.0,
+    max_position_pct: float = 30.0,
+) -> dict[str, object]:
+    try:
+        requested_codes = [item.strip() for item in stock_codes.split(",") if item.strip()] if stock_codes else None
+        return run_strategy_stability_lab(
+            requested_codes,
+            max_stocks=max_stocks,
+            initial_cash=initial_cash,
+            max_position_pct=max_position_pct / 100,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/strategy-stability/latest")
+def latest_strategy_stability() -> dict[str, object]:
+    return load_latest_strategy_stability()
 
 
 @app.put("/api/watchlist/{stock_code}")

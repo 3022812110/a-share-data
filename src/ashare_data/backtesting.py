@@ -39,7 +39,8 @@ def _load_daily_bar_frame(stock_code: str, start_date: str | None = None, end_da
     with get_connection() as connection:
         frame = pd.read_sql_query(
             f"""
-            SELECT trade_date, open, high, low, close, volume
+            SELECT trade_date, open, high, low, close, volume, amount,
+                   change_pct, turnover_ratio, pre_close
             FROM daily_bars
             WHERE {' AND '.join(conditions)}
             ORDER BY trade_date ASC
@@ -51,20 +52,25 @@ def _load_daily_bar_frame(stock_code: str, start_date: str | None = None, end_da
         return frame
 
     frame["trade_date"] = pd.to_datetime(frame["trade_date"])
-    for column in ["open", "high", "low", "close", "volume"]:
+    for column in ["open", "high", "low", "close", "volume", "amount", "change_pct", "turnover_ratio", "pre_close"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.dropna(subset=["open", "high", "low", "close"])
     frame = frame.set_index("trade_date")
     return frame
 
 
-def ensure_daily_bars_for_backtest(stock_code: str, *, lookback_days: int = 400) -> pd.DataFrame:
+def ensure_daily_bars_for_backtest(
+    stock_code: str,
+    *,
+    lookback_days: int = 400,
+    min_bars: int = 0,
+) -> pd.DataFrame:
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     frame = _load_daily_bar_frame(stock_code, start_date=start_date, end_date=end_date)
     latest_date = frame.index.max().date().isoformat() if not frame.empty else None
 
-    if frame.empty or latest_date < (datetime.now().date() - timedelta(days=7)).isoformat():
+    if frame.empty or len(frame) < max(0, int(min_bars)) or latest_date < (datetime.now().date() - timedelta(days=7)).isoformat():
         sync_daily_bars_for_codes(
             stock_codes=[stock_code],
             start_date=start_date,

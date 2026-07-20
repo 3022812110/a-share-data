@@ -137,6 +137,23 @@ def init_db() -> None:
                 fetched_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS market_index_daily_bars (
+                index_code TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                open REAL,
+                close REAL,
+                high REAL,
+                low REAL,
+                volume REAL,
+                amount REAL,
+                source TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (index_code, trade_date)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_market_index_daily_bars_code_date
+            ON market_index_daily_bars (index_code, trade_date DESC);
+
             CREATE TABLE IF NOT EXISTS market_overview_cache (
                 cache_key TEXT PRIMARY KEY,
                 payload_json TEXT NOT NULL,
@@ -293,6 +310,7 @@ def init_db() -> None:
                 account_snapshot_json TEXT NOT NULL,
                 market_context_json TEXT NOT NULL,
                 topic_context_json TEXT NOT NULL,
+                strategy_context_json TEXT NOT NULL DEFAULT '{}',
                 recommendations_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -339,6 +357,41 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_paper_account_snapshots_account_date
             ON paper_account_snapshots (account_id, snapshot_date DESC);
+
+            CREATE TABLE IF NOT EXISTS strategy_experiment_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                data_start_date TEXT NOT NULL,
+                data_end_date TEXT NOT NULL,
+                split_date TEXT,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_strategy_experiment_runs_stock_created
+            ON strategy_experiment_runs (stock_code, created_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS strategy_stability_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                universe_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_strategy_stability_runs_created
+            ON strategy_stability_runs (created_at DESC, id DESC);
+
+            CREATE TABLE IF NOT EXISTS strategy_candidate_validations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code TEXT NOT NULL,
+                data_end_date TEXT,
+                status TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_strategy_candidate_validations_stock_created
+            ON strategy_candidate_validations (stock_code, created_at DESC, id DESC);
 
             CREATE TABLE IF NOT EXISTS screening_chat_sessions (
                 context_key TEXT PRIMARY KEY,
@@ -459,6 +512,14 @@ def init_db() -> None:
         ):
             if column_name not in ai_trade_columns:
                 connection.execute(column_sql)
+        recommendation_run_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(ai_recommendation_runs)").fetchall()
+        }
+        if "strategy_context_json" not in recommendation_run_columns:
+            connection.execute(
+                "ALTER TABLE ai_recommendation_runs ADD COLUMN strategy_context_json TEXT NOT NULL DEFAULT '{}'"
+            )
         connection.execute(
             """
             UPDATE watchlist

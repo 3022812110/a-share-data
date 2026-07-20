@@ -73,7 +73,16 @@ class RecommendationPerformanceTest(TestCase):
             account_id="default",
             policy_version="test.v1",
             market_context={"latest_trade_time": "2026-07-17 15:00:00", "regime": "震荡"},
-            recommendations=[{"stock_code": "000001", "stock_name": "示例", "price": 10, "score": 88}],
+            recommendations=[
+                {
+                    "stock_code": "000001",
+                    "stock_name": "示例",
+                    "action": "buy",
+                    "recommended_quantity": 100,
+                    "price": 10,
+                    "score": 88,
+                }
+            ],
             created_at="2026-07-17T07:00:00Z",
         )
         row = connection.execute("SELECT * FROM ai_recommendation_items").fetchone()
@@ -82,3 +91,53 @@ class RecommendationPerformanceTest(TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(row["recommendation_date"], "2026-07-17")
         self.assertEqual(row["base_price"], 10)
+
+    def test_does_not_track_watch_candidates_as_buy_recommendations(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE ai_recommendation_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT,
+                recommendation_date TEXT NOT NULL,
+                base_price REAL NOT NULL,
+                score REAL,
+                market_regime TEXT,
+                policy_version TEXT NOT NULL,
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                evaluated_trade_days INTEGER NOT NULL DEFAULT 0,
+                latest_evaluated_date TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(run_id, stock_code)
+            )
+            """
+        )
+
+        count = register_recommendation_items(
+            connection,
+            run_id=2,
+            account_id="default",
+            policy_version="test.v1",
+            market_context={"latest_trade_time": "2026-07-17 15:00:00", "regime": "震荡"},
+            recommendations=[
+                {
+                    "stock_code": "000002",
+                    "stock_name": "观察示例",
+                    "action": "watch",
+                    "recommended_quantity": 0,
+                    "price": 10,
+                    "score": 80,
+                }
+            ],
+            created_at="2026-07-17T07:00:00Z",
+        )
+        stored_count = connection.execute("SELECT COUNT(*) FROM ai_recommendation_items").fetchone()[0]
+        connection.close()
+
+        self.assertEqual(count, 0)
+        self.assertEqual(stored_count, 0)
