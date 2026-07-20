@@ -1,5 +1,5 @@
 import React from "react";
-import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Space, Tabs, Tag, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Space, Table, Tabs, Tag, Typography } from "antd";
 
 import PaperTradeCard from "./PaperTradeCard";
 import StockKLinePanel from "./StockKLinePanel";
@@ -683,30 +683,106 @@ export default function DetailPanel({
     </Card>
   );
 
+  const strategyColumns = [
+    {
+      title: "策略",
+      dataIndex: "name",
+      render: (value, record) => (
+        <Space direction="vertical" size={0}>
+          <Text strong>{value}</Text>
+          <Text type="secondary">训练 {percentText(record.in_sample?.strategy_return_pct)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "样本外收益",
+      key: "outReturn",
+      render: (_, record) => (
+        <Text strong style={colorStyle(record.out_of_sample?.strategy_return_pct)}>
+          {percentText(record.out_of_sample?.strategy_return_pct)}
+        </Text>
+      ),
+    },
+    {
+      title: "超额 / 回撤",
+      key: "risk",
+      render: (_, record) => (
+        <Space direction="vertical" size={0}>
+          <Text style={colorStyle(record.out_of_sample?.excess_return_pct)}>
+            超额 {percentText(record.out_of_sample?.excess_return_pct)}
+          </Text>
+          <Text type="secondary">回撤 {percentText(record.out_of_sample?.max_drawdown_pct)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "交易",
+      key: "trades",
+      render: (_, record) => (
+        <Space direction="vertical" size={0}>
+          <Text>{record.out_of_sample?.closed_trades ?? 0} 次</Text>
+          <Text type="secondary">胜率 {percentText(record.out_of_sample?.win_rate_pct)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: "结论",
+      key: "robustness",
+      render: (_, record) => {
+        const status = record.robustness?.status;
+        const color = status === "stable" ? "green" : status === "observe" ? "gold" : status === "reject" ? "red" : "default";
+        return <Tag color={color}>{record.robustness?.label ?? "待判断"}</Tag>;
+      },
+    },
+  ];
+
+  const strategyConclusionType = backtest?.conclusion?.status === "evidence_available"
+    ? "success"
+    : backtest?.conclusion?.status === "observe_only"
+      ? "warning"
+      : "info";
+
   const backtestCard = (
     <Card
       key="backtest"
       size="small"
-      title="Backtrader 回测"
+      title="策略实验室"
       extra={
         <Button size="small" onClick={onRunBacktest} loading={backtesting}>
-          运行 SMA 5/20
+          运行多策略验证
         </Button>
       }
     >
       {backtest?.status === "ok" ? (
-        <Descriptions size="small" column={1} colon={false}>
-          <Descriptions.Item label="回测区间">
-            {backtest.data_start_date} 至 {backtest.data_end_date}
-          </Descriptions.Item>
-          <Descriptions.Item label="策略收益">{percentText(backtest.strategy_return_pct)}</Descriptions.Item>
-          <Descriptions.Item label="基准收益">{percentText(backtest.benchmark_return_pct)}</Descriptions.Item>
-          <Descriptions.Item label="最大回撤">{percentText(-Math.abs(backtest.max_drawdown_pct ?? 0))}</Descriptions.Item>
-          <Descriptions.Item label="平仓次数">{backtest.closed_trades ?? 0}</Descriptions.Item>
-          <Descriptions.Item label="胜率">{percentText(backtest.win_rate_pct)}</Descriptions.Item>
-        </Descriptions>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            showIcon
+            type={strategyConclusionType}
+            message={backtest.conclusion?.label}
+            description={backtest.conclusion?.summary}
+          />
+          <Descriptions size="small" column={2} colon={false}>
+            <Descriptions.Item label="数据区间">
+              {backtest.data_start_date} 至 {backtest.data_end_date}
+            </Descriptions.Item>
+            <Descriptions.Item label="样本外起点">{backtest.split_date}</Descriptions.Item>
+            <Descriptions.Item label="验证方式" span={2}>{backtest.validation_method}</Descriptions.Item>
+            <Descriptions.Item label="成交模型" span={2}>{backtest.execution_model}</Descriptions.Item>
+          </Descriptions>
+          <Table
+            rowKey="key"
+            size="small"
+            columns={strategyColumns}
+            dataSource={backtest.strategies ?? []}
+            pagination={false}
+            scroll={{ x: 680 }}
+          />
+          <Text type="secondary">策略通过只代表历史样本外结果较稳健，最终建议仍受市场硬风控和组合仓位限制。</Text>
+        </Space>
+      ) : backtest?.status === "insufficient_data" ? (
+        <Alert showIcon type="warning" message="历史数据不足" description={backtest.summary} />
       ) : (
-        <Text type="secondary">点击右上角按钮，用本地日线数据跑一版稳妥的 SMA 5/20 研究回测。</Text>
+        <Text type="secondary">运行后会自动比较趋势跟随、放量突破和超跌修复，并用后30%时间段做未参与选参的样本外验证。</Text>
       )}
     </Card>
   );
@@ -777,7 +853,10 @@ export default function DetailPanel({
         <Tabs
           activeKey={activeTab}
           onChange={setActiveTab}
-          items={sectionMap[activeMenu] ?? []}
+          items={(sectionMap[activeMenu] ?? []).map((item) => ({
+            ...item,
+            forceRender: item.key === "watchlist" || item.key === "trade",
+          }))}
           size="small"
           className="detail-tabs detail-workspace-tabs"
         />

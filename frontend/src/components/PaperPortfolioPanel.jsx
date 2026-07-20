@@ -1,9 +1,10 @@
-import { Alert, Badge, Button, Card, Space, Table, Tag, Typography } from "antd";
+import { Alert, Badge, Button, Card, Progress, Space, Table, Tag, Typography } from "antd";
 
 import PaperSummaryCards from "./PaperSummaryCards";
 import CompactEmpty from "./CompactEmpty";
 import MarketStatusNotice from "./MarketStatusNotice";
 import RecommendationPerformancePanel from "./RecommendationPerformancePanel";
+import StrategyStabilityPanel from "./StrategyStabilityPanel";
 import { capText, colorStyle, numberText, percentText } from "../lib/formatters";
 
 const { Text } = Typography;
@@ -16,17 +17,24 @@ export default function PaperPortfolioPanel({
   recommendationLoading,
   recommendationPerformance,
   performanceLoading,
+  strategyStability,
+  strategyStabilityLoading,
+  strategyPrevalidation,
   onSelectCode,
   onOpenReview,
   onQuickTrade,
   onRefreshRecommendations,
   onRefreshPerformance,
+  onRunStrategyStability,
 }) {
   const positions = portfolio?.positions ?? [];
   const trades = portfolio?.trades ?? [];
   const marketContext = recommendationSummary?.market_context ?? {};
   const tradeGate = marketContext.trade_gate ?? {};
   const recommendationAccount = recommendationSummary?.account ?? {};
+  const strategyContext = recommendationSummary?.strategy_context ?? {};
+  const strategyCandidateActions = strategyContext.candidate_actions ?? {};
+  const prevalidation = strategyPrevalidation ?? strategyContext.prevalidation ?? {};
   const marketStatus = portfolio?.market_status ?? {};
   const riskDiagnosis = portfolio?.risk_diagnosis ?? {};
   const marketOpen = marketStatus.is_open === true;
@@ -58,12 +66,17 @@ export default function PaperPortfolioPanel({
     {
       title: "买入计划",
       key: "plan",
-      render: (_, record) => (
+      render: (_, record) => record.action === "buy" ? (
         <Space size={8} className="dense-cell-line">
           <Text>{record.recommended_quantity}股</Text>
           <Text type="secondary">约¥{numberText(record.estimated_cash)}</Text>
           <Text type="secondary">区间 {numberText(record.entry_zone_low)}-{numberText(record.entry_zone_high)}</Text>
           <Text type="secondary">损 {numberText(record.stop_loss_price)} / 盈 {numberText(record.take_profit_price)}</Text>
+        </Space>
+      ) : (
+        <Space size={8} className="dense-cell-line">
+          <Tag bordered={false}>仅观察</Tag>
+          <Text type="secondary">等待滚动验证与当前行情同时通过</Text>
         </Space>
       ),
     },
@@ -84,6 +97,12 @@ export default function PaperPortfolioPanel({
       key: "reason",
       render: (_, record) => (
         <Space direction="vertical" size={2}>
+          <Tag
+            bordered={false}
+            color={record.strategy_evidence?.action === "support" ? "green" : record.strategy_evidence?.action === "caution" ? "gold" : "default"}
+          >
+            {record.strategy_evidence?.label ?? "策略未验证"}
+          </Tag>
           {(record.reasons ?? []).slice(0, 2).map((item, index) => (
             <Text key={`${record.stock_code}-reason-${index}`} type="secondary">
               {item}
@@ -101,22 +120,26 @@ export default function PaperPortfolioPanel({
       key: "actions",
       render: (_, record) => (
         <Space direction="vertical" size={6}>
-          <Button
-            size="small"
-            type="primary"
-            disabled={!marketOpen || tradeGate.allow_new_positions === false}
-            onClick={(event) => {
-              event.stopPropagation();
-              onQuickTrade?.(
-                record.stock_code,
-                "buy",
-                record.recommended_quantity,
-                `训练推荐买入 ${record.recommended_quantity} 股：${record.entry_reason}`,
-              );
-            }}
-          >
-            买入
-          </Button>
+          {record.action === "buy" ? (
+            <Button
+              size="small"
+              type="primary"
+              disabled={!marketOpen || tradeGate.allow_new_positions === false}
+              onClick={(event) => {
+                event.stopPropagation();
+                onQuickTrade?.(
+                  record.stock_code,
+                  "buy",
+                  record.recommended_quantity,
+                  `训练推荐买入 ${record.recommended_quantity} 股：${record.entry_reason}`,
+                );
+              }}
+            >
+              买入
+            </Button>
+          ) : (
+            <Button size="small" disabled>观察</Button>
+          )}
           <Button
             size="small"
             onClick={(event) => {
@@ -266,7 +289,7 @@ export default function PaperPortfolioPanel({
       <Card
         variant="borderless"
         className="table-card trade-recommendation-card"
-        title="训练推荐"
+        title="训练推荐与观察"
         loading={recommendationLoading}
         extra={
           <Button size="small" onClick={onRefreshRecommendations} loading={recommendationLoading}>
@@ -297,16 +320,53 @@ export default function PaperPortfolioPanel({
             style={{ marginBottom: 12 }}
           />
         ) : null}
+        {strategyContext.run_id ? (
+          <Alert
+            showIcon
+            type={(strategyCandidateActions.block ?? 0) > 0 ? "warning" : "info"}
+            message={`策略证据已接入 · 当前映射为${strategyContext.mapped_historical_regime ?? "未知"}行情`}
+            description={`稳定性记录 #${strategyContext.run_id}：加分 ${strategyCandidateActions.support ?? 0}，降权 ${strategyCandidateActions.caution ?? 0}，阻断 ${strategyCandidateActions.block ?? 0}，未验证 ${strategyCandidateActions.untested ?? 0}。`}
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
+        {prevalidation.job_id ? (
+          <Alert
+            showIcon
+            type={prevalidation.status === "completed_with_errors" ? "warning" : prevalidation.status === "completed" ? "success" : "info"}
+            message={prevalidation.status === "running"
+              ? `候选策略后台验证中 · ${prevalidation.completed ?? 0}/${prevalidation.total ?? 0}`
+              : prevalidation.status === "completed_with_errors"
+                ? "候选策略预验证已结束，部分标的失败"
+                : "候选策略预验证已完成"}
+            description={(
+              <Space direction="vertical" size={3} style={{ width: "100%" }}>
+                <Progress percent={Math.round(prevalidation.progress_pct ?? 0)} size="small" status={prevalidation.status === "completed_with_errors" ? "exception" : undefined} />
+                <Text type="secondary">
+                  {prevalidation.status === "running" && prevalidation.current_stock_code
+                    ? `正在验证 ${prevalidation.current_stock_code}；验证前只能观察。`
+                    : `24 小时缓存已有 ${prevalidation.cached_count ?? 0} 只；只有稳定且匹配当前行情的候选可买入。`}
+                </Text>
+              </Space>
+            )}
+            style={{ marginBottom: 12 }}
+          />
+        ) : null}
         <Table
           rowKey="stock_code"
           size="small"
           columns={recommendationColumns}
           dataSource={recommendations}
           pagination={false}
-          locale={{ emptyText: <CompactEmpty description="当前没有满足仓位和风险条件的训练标的" /> }}
+          locale={{ emptyText: <CompactEmpty description="当前没有满足风险条件的买入或观察候选" /> }}
           onRow={(record) => ({ onClick: () => onSelectCode(record.stock_code) })}
         />
       </Card>
+      <StrategyStabilityPanel
+        stability={strategyStability}
+        loading={strategyStabilityLoading}
+        onRun={onRunStrategyStability}
+        onSelectCode={onSelectCode}
+      />
       <RecommendationPerformancePanel
         performance={recommendationPerformance}
         loading={performanceLoading}

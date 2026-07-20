@@ -107,6 +107,10 @@ export default function StockWorkspace() {
   const [tradeRecommendationLoading, setTradeRecommendationLoading] = React.useState(false);
   const [recommendationPerformance, setRecommendationPerformance] = React.useState(null);
   const [performanceLoading, setPerformanceLoading] = React.useState(false);
+  const [strategyStability, setStrategyStability] = React.useState(null);
+  const [strategyStabilityLoading, setStrategyStabilityLoading] = React.useState(false);
+  const [strategyPrevalidation, setStrategyPrevalidation] = React.useState(null);
+  const refreshedPrevalidationJobRef = React.useRef("");
   const [form] = Form.useForm();
   const [paperForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
@@ -201,10 +205,11 @@ export default function StockWorkspace() {
       const data = await request("/api/ai-trade/recommendations?limit=6");
       setTradeRecommendations(data.recommendations ?? []);
       setTradeRecommendationSummary(data);
+      setStrategyPrevalidation(data.prevalidation ?? data.strategy_context?.prevalidation ?? null);
       setTradeQuantities((current) => {
         const next = { ...current };
         for (const item of data.recommendations ?? []) {
-          if (next[item.stock_code] === undefined) {
+          if (item.action === "buy" && next[item.stock_code] === undefined) {
             next[item.stock_code] = item.recommended_quantity ?? 100;
           }
         }
@@ -229,6 +234,28 @@ export default function StockWorkspace() {
     }
   }, [message]);
 
+  const runStrategyStability = React.useCallback(async () => {
+    setStrategyStabilityLoading(true);
+    try {
+      const data = await request("/api/strategy-stability?max_stocks=8");
+      setStrategyStability(data);
+      message.success("多股票滚动样本外验证完成");
+    } catch (error) {
+      message.error(error.message || "策略稳定性验证失败");
+    } finally {
+      setStrategyStabilityLoading(false);
+    }
+  }, [message]);
+
+  const loadLatestStrategyStability = React.useCallback(async () => {
+    try {
+      const data = await request("/api/strategy-stability/latest");
+      setStrategyStability(data.status === "not_run" ? null : data);
+    } catch (error) {
+      message.error(error.message || "加载策略稳定性记录失败");
+    }
+  }, [message]);
+
   const loadDetail = React.useCallback(async () => {
     if (!detailPageOpen || !selectedCode) {
       setDetail(null);
@@ -238,30 +265,35 @@ export default function StockWorkspace() {
     try {
       const data = await request(`/api/stocks/${selectedCode}`);
       setDetail(data);
-      form.setFieldsValue({
-        display_name: data.snapshot?.display_name ?? "",
-        notes: data.snapshot?.notes ?? "",
-        buy_price: data.snapshot?.buy_price ?? undefined,
-        take_profit_price: data.snapshot?.take_profit_price ?? undefined,
-        stop_loss_price: data.snapshot?.stop_loss_price ?? undefined,
-        default_trade_quantity: data.snapshot?.default_trade_quantity ?? 100,
-      });
-      paperForm.setFieldsValue({
-        quantity: data.snapshot?.default_trade_quantity ?? 100,
-        note: "",
-        entry_reason: data.snapshot?.paper_entry_reason ?? data.snapshot?.notes ?? "",
-        planned_holding_days: data.snapshot?.paper_planned_holding_days ?? undefined,
-        plan_stop_loss_price: data.snapshot?.paper_stop_loss_price ?? data.snapshot?.stop_loss_price ?? undefined,
-        plan_take_profit_price: data.snapshot?.paper_take_profit_price ?? data.snapshot?.take_profit_price ?? undefined,
-        invalidation_condition: data.snapshot?.paper_invalidation_condition ?? "",
-        plan_note: data.snapshot?.paper_plan_note ?? "",
-      });
     } catch (error) {
       message.error(error.message || "加载股票详情失败");
     } finally {
       setDetailLoading(false);
     }
-  }, [detailPageOpen, form, message, paperForm, selectedCode]);
+  }, [detailPageOpen, message, selectedCode]);
+
+  React.useEffect(() => {
+    const snapshot = detail?.snapshot;
+    if (!snapshot) return;
+    form.setFieldsValue({
+      display_name: snapshot.display_name ?? "",
+      notes: snapshot.notes ?? "",
+      buy_price: snapshot.buy_price ?? undefined,
+      take_profit_price: snapshot.take_profit_price ?? undefined,
+      stop_loss_price: snapshot.stop_loss_price ?? undefined,
+      default_trade_quantity: snapshot.default_trade_quantity ?? 100,
+    });
+    paperForm.setFieldsValue({
+      quantity: snapshot.default_trade_quantity ?? 100,
+      note: "",
+      entry_reason: snapshot.paper_entry_reason ?? snapshot.notes ?? "",
+      planned_holding_days: snapshot.paper_planned_holding_days ?? undefined,
+      plan_stop_loss_price: snapshot.paper_stop_loss_price ?? snapshot.stop_loss_price ?? undefined,
+      plan_take_profit_price: snapshot.paper_take_profit_price ?? snapshot.take_profit_price ?? undefined,
+      invalidation_condition: snapshot.paper_invalidation_condition ?? "",
+      plan_note: snapshot.paper_plan_note ?? "",
+    });
+  }, [detail, form, paperForm]);
 
   const loadScreening = React.useCallback(async () => {
     if (activeMenu !== "analysis") return;
@@ -343,10 +375,43 @@ export default function StockWorkspace() {
       loadPaperPortfolio().catch(() => {});
       loadTradeRecommendations().catch(() => {});
       loadRecommendationPerformance().catch(() => {});
+      loadLatestStrategyStability().catch(() => {});
     } else {
       loadList().catch(() => {});
     }
-  }, [activeMenu, loadList, loadPaperPortfolio, loadRecommendationPerformance, loadScreening, loadTradeRecommendations]);
+  }, [activeMenu, loadLatestStrategyStability, loadList, loadPaperPortfolio, loadRecommendationPerformance, loadScreening, loadTradeRecommendations]);
+
+  React.useEffect(() => {
+    if (activeMenu !== "paper" || strategyPrevalidation?.status !== "running") return undefined;
+
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const data = await request("/api/strategy-prevalidation/status");
+        if (cancelled) return;
+        setStrategyPrevalidation(data);
+        if (data.status === "completed" || data.status === "completed_with_errors") {
+          if (data.job_id && refreshedPrevalidationJobRef.current !== data.job_id) {
+            refreshedPrevalidationJobRef.current = data.job_id;
+            await loadTradeRecommendations();
+            if (!cancelled) {
+              message.success(data.status === "completed" ? "候选策略预验证完成，推荐已刷新" : "候选预验证已结束，部分标的验证失败");
+            }
+          }
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+      timer = window.setTimeout(poll, 2_000);
+    };
+    timer = window.setTimeout(poll, 1_500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeMenu, loadTradeRecommendations, message, strategyPrevalidation?.status]);
 
   React.useEffect(() => {
     loadDetail().catch(() => {});
@@ -547,11 +612,11 @@ export default function StockWorkspace() {
     if (!selectedCode) return;
     setBacktesting(true);
     try {
-      const data = await request(`/api/backtest/${selectedCode}`);
+      const data = await request(`/api/strategy-lab/${selectedCode}`);
       setBacktest(data);
-      message.success("回测完成");
+      message.success("策略样本外验证完成");
     } catch (error) {
-      message.error(error.message || "回测失败");
+      message.error(error.message || "策略验证失败");
     } finally {
       setBacktesting(false);
     }
@@ -852,11 +917,15 @@ export default function StockWorkspace() {
                   recommendationLoading={tradeRecommendationLoading}
                   recommendationPerformance={recommendationPerformance}
                   performanceLoading={performanceLoading}
+                  strategyStability={strategyStability}
+                  strategyStabilityLoading={strategyStabilityLoading}
+                  strategyPrevalidation={strategyPrevalidation}
                   onSelectCode={handleOpenDetail}
                   onOpenReview={handleOpenReview}
                   onQuickTrade={handleQuickTrade}
                   onRefreshRecommendations={loadTradeRecommendations}
                   onRefreshPerformance={loadRecommendationPerformance}
+                  onRunStrategyStability={runStrategyStability}
                 />
               ) : activeMenu === "analysis" || activeMenu === "changes" || activeMenu === "funds" ? null : (
                 <StockTable
